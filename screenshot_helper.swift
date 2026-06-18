@@ -78,8 +78,12 @@ let handler: EventHandlerUPP = { (_, event, _) -> OSStatus in
         MemoryLayout<EventHotKeyID>.size, nil, &hkID
     )
     switch hkID.id {
-    case 1: takeScreenshot()
-    case 2: getSelectedText()
+    case 1:
+        fputs("[screenshot-helper] hotkey 1 (screenshot) fired\n", stderr)
+        takeScreenshot()
+    case 2:
+        fputs("[screenshot-helper] hotkey 2 (selection) fired\n", stderr)
+        getSelectedText()
     default: break
     }
     return noErr
