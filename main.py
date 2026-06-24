@@ -40,9 +40,8 @@ SCREENSHOT_HELPER = Path(__file__).parent / "screenshot_helper"
 BEAM_SIZE = 5
 
 # ── Diarization config ──────────────────────────────────────────────────────
-WIN_SEC = 1.5           # embedding window length (seconds)
-HOP_SEC = 0.75          # embedding window hop (seconds)
-SPEECH_COVERAGE = 0.5   # min speech fraction in window to compute embedding
+PHRASE_GAP_SEC = 0.6       # gap between words to split phrases for embedding
+MIN_PHRASE_AUDIO_SEC = 1.0 # min audio duration for reliable speaker embedding
 
 # ── Globals ──────────────────────────────────────────────────────────────────
 audio_queue: queue.Queue[np.ndarray] = queue.Queue()
@@ -196,6 +195,30 @@ def transcription_worker(whisper_model, output_file, session_data, enable_diariz
                         t_end=seg_t_start + duration,
                         words=asr_words,
                     ))
+
+                    # Group words into phrases and submit for speaker embedding
+                    phrases = [[asr_words[0]]]
+                    for w in asr_words[1:]:
+                        if w.t_start - phrases[-1][-1].t_end > PHRASE_GAP_SEC:
+                            phrases.append([w])
+                        else:
+                            phrases[-1].append(w)
+
+                    for phrase in phrases:
+                        abs_start = phrase[0].t_start
+                        abs_end = phrase[-1].t_end
+                        rel_start = abs_start - seg_t_start
+                        rel_end = abs_end - seg_t_start
+                        # Pad short phrases for better embedding quality
+                        phrase_dur = rel_end - rel_start
+                        if phrase_dur < MIN_PHRASE_AUDIO_SEC:
+                            pad = (MIN_PHRASE_AUDIO_SEC - phrase_dur) / 2
+                            rel_start = max(0, rel_start - pad)
+                            rel_end = min(duration, rel_end + pad)
+                        s = int(rel_start * SAMPLE_RATE)
+                        e = int(rel_end * SAMPLE_RATE)
+                        if e > s:
+                            embed_queue.put((abs_start, abs_end, segment_audio[s:e].copy()))
             else:
                 sys.stdout.write("\r\033[K")
                 sys.stdout.flush()
@@ -243,8 +266,8 @@ def embed_worker(embedder, session_data):
             embed_queue.task_done()
 
 
-def vad_loop(vad_model, enable_diarization):
-    """Main-thread VAD loop: detect speech segments, optionally emit embedding windows."""
+def vad_loop(vad_model):
+    """Main-thread VAD loop: detect speech segments and enqueue for transcription."""
     vad_chunk_samples = 512  # 32ms at 16kHz
     silence_chunks = int((SILENCE_DURATION_MS / 1000) * SAMPLE_RATE / vad_chunk_samples)
     min_speech_chunks = int((MIN_SPEECH_DURATION_MS / 1000) * SAMPLE_RATE / vad_chunk_samples)
@@ -258,14 +281,6 @@ def vad_loop(vad_model, enable_diarization):
     # Sample-accurate timing
     samples_processed = 0
     speech_start_sample = 0
-
-    # Embedding window tracking (only when diarization is on)
-    if enable_diarization:
-        win_samples = int(WIN_SEC * SAMPLE_RATE)
-        hop_samples = int(HOP_SEC * SAMPLE_RATE)
-        embed_audio_ring = np.array([], dtype=np.float32)
-        embed_vad_ring: list[bool] = []
-        next_window_at = win_samples
 
     while not stop_event.is_set():
         # Drain audio_queue into buffer
@@ -286,36 +301,6 @@ def vad_loop(vad_model, enable_diarization):
 
             samples_processed += vad_chunk_samples
 
-            # ── Embedding window tracking ────────────────────────────────
-            if enable_diarization:
-                embed_audio_ring = np.concatenate([embed_audio_ring, window])
-                embed_vad_ring.append(is_speech)
-
-                while (samples_processed >= next_window_at
-                       and len(embed_audio_ring) >= win_samples):
-                    n_frames = win_samples // vad_chunk_samples
-                    win_vad = embed_vad_ring[-n_frames:]
-                    coverage = sum(win_vad) / len(win_vad)
-
-                    if coverage >= SPEECH_COVERAGE:
-                        t0 = (samples_processed - win_samples) / SAMPLE_RATE
-                        t1 = samples_processed / SAMPLE_RATE
-                        embed_queue.put((
-                            t0, t1,
-                            embed_audio_ring[-win_samples:].copy(),
-                        ))
-
-                    next_window_at += hop_samples
-
-                # Trim ring buffers to avoid unbounded growth
-                max_keep = win_samples * 2
-                if len(embed_audio_ring) > max_keep:
-                    trim = len(embed_audio_ring) - max_keep
-                    embed_audio_ring = embed_audio_ring[trim:]
-                    trim_frames = trim // vad_chunk_samples
-                    embed_vad_ring = embed_vad_ring[trim_frames:]
-
-            # ── VAD speech segmentation ──────────────────────────────────
             if is_speech:
                 if not is_speaking:
                     is_speaking = True
@@ -650,7 +635,7 @@ def main():
     print(f"Ctrl+Shift+S: screenshot, Ctrl+Shift+W: selection")
 
     try:
-        vad_loop(vad_model, enable_diarization)
+        vad_loop(vad_model)
     finally:
         screenshot_proc.terminate()
         stream.stop()
