@@ -245,25 +245,30 @@ def transcription_worker(whisper_model, output_file, session_data, enable_diariz
 
 
 def embed_worker(embedder, session_data):
-    """Daemon thread: compute speaker embeddings for audio windows, discard audio."""
+    """Daemon thread: compute speaker embeddings for phrase audio.
+    Exits when it receives None sentinel from the queue."""
+    count = 0
     while True:
-        try:
-            item = embed_queue.get(timeout=0.5)
-        except queue.Empty:
-            if stop_event.is_set() and embed_queue.empty():
-                break
-            continue
-
+        item = embed_queue.get()
+        if item is None:
+            embed_queue.task_done()
+            break
         t_start, t_end, audio = item
+        count += 1
         try:
             vector = embedder.embed(audio)
             session_data["windows"].append(EmbeddingWindow(
                 vector=vector, t_start=t_start, t_end=t_end,
             ))
+            sys.stdout.write(f"\r\033[K[embedding] {count} phrases")
+            sys.stdout.flush()
         except Exception as e:
             print(f"[embed error] {e}", file=sys.stderr)
         finally:
             embed_queue.task_done()
+    if count:
+        sys.stdout.write(f"\r\033[K[embedding] done ({count} phrases)\n")
+        sys.stdout.flush()
 
 
 def vad_loop(vad_model):
@@ -640,9 +645,10 @@ def main():
         screenshot_proc.terminate()
         stream.stop()
         stream.close()
-        # Wait for pending transcriptions and embeddings
+        # Wait for pending transcriptions, then drain embeddings
         transcribe_queue.join()
         if enable_diarization:
+            embed_queue.put(None)  # sentinel → embed_worker exits after finishing
             embed_queue.join()
         ocr_queue.join()
         output_file.close()
