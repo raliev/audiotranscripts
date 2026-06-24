@@ -133,9 +133,11 @@ def transcription_worker(whisper_model, output_file, session_data, enable_diariz
             item = transcribe_queue.get(timeout=0.5)
         except queue.Empty:
             flush_pending_injections(output_file, session_data)
-            if stop_event.is_set() and transcribe_queue.empty():
-                break
             continue
+
+        if item is None:  # sentinel → exit
+            transcribe_queue.task_done()
+            break
 
         seg_t_start, segment_audio = item
         duration = len(segment_audio) / SAMPLE_RATE
@@ -342,6 +344,8 @@ def vad_loop(vad_model):
 
     # Flush remaining speech buffer on shutdown
     if len(speech_buffer) > 0 and speech_count >= min_speech_chunks:
+        sys.stdout.write("\r\033[K")
+        sys.stdout.flush()
         t_start = speech_start_sample / SAMPLE_RATE
         transcribe_queue.put((t_start, speech_buffer.copy()))
 
@@ -429,9 +433,12 @@ def ocr_worker():
         try:
             image_path = ocr_queue.get(timeout=0.5)
         except queue.Empty:
-            if stop_event.is_set() and ocr_queue.empty():
-                break
             continue
+
+        if image_path is None:  # sentinel → exit
+            ocr_queue.task_done()
+            break
+
         try:
             if not Path(image_path).exists():
                 print(f"[OCR skip] file not found: {image_path}", file=sys.stderr)
@@ -649,11 +656,13 @@ def main():
         screenshot_proc.terminate()
         stream.stop()
         stream.close()
-        # Wait for pending transcriptions, then drain embeddings
+        # Signal workers to finish (sentinel after all real items)
+        transcribe_queue.put(None)
         transcribe_queue.join()
         if enable_diarization:
-            embed_queue.put(None)  # sentinel → embed_worker exits after finishing
+            embed_queue.put(None)
             embed_queue.join()
+        ocr_queue.put(None)
         ocr_queue.join()
         output_file.close()
 
