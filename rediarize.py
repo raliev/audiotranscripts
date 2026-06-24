@@ -7,6 +7,7 @@ import sys
 from datetime import timedelta
 from pathlib import Path
 
+import numpy as np
 from speaker_id import cluster_and_label, diarize_words
 
 
@@ -33,6 +34,61 @@ def load_session(project_dir, session_name=None):
         sys.exit(1)
 
     return data
+
+
+def debug_session(data):
+    """Print diagnostic info about session embeddings."""
+    windows = data["windows"]
+    segments = data["segments"]
+
+    # Word count
+    n_words = sum(len(seg.words) for seg in segments)
+    print(f"\nSegments: {len(segments)}, Words: {n_words}, Embedding windows: {len(windows)}")
+
+    if not windows:
+        return
+
+    # Window details
+    print(f"\nPhrases:")
+    for i, w in enumerate(windows):
+        dur = w.t_end - w.t_start
+        print(f"  [{i:2d}] {w.t_start:7.1f}s — {w.t_end:7.1f}s  ({dur:.1f}s)")
+
+    if len(windows) < 2:
+        print("\nOnly 1 window — cannot compute distances.")
+        return
+
+    # Pairwise cosine distances
+    vectors = np.array([w.vector for w in windows])
+    # cosine_distance = 1 - cosine_similarity
+    norms = np.linalg.norm(vectors, axis=1, keepdims=True)
+    normed = vectors / (norms + 1e-8)
+    sim = normed @ normed.T
+    dist = 1.0 - sim
+
+    upper = dist[np.triu_indices_from(dist, k=1)]
+    print(f"\nPairwise cosine distances ({len(upper)} pairs):")
+    print(f"  min:  {upper.min():.4f}")
+    print(f"  max:  {upper.max():.4f}")
+    print(f"  mean: {upper.mean():.4f}")
+    print(f"  std:  {upper.std():.4f}")
+
+    if len(windows) <= 30:
+        print(f"\nDistance matrix:")
+        header = "      " + "".join(f" [{i:2d}]" for i in range(len(windows)))
+        print(header)
+        for i in range(len(windows)):
+            row = f"[{i:2d}]  " + "".join(f" {dist[i,j]:.2f}" for j in range(len(windows)))
+            print(row)
+
+    # Hint
+    if upper.max() < 0.3:
+        print(f"\n⚠ Max distance is only {upper.max():.3f} — embeddings are very similar.")
+        print("  Possible causes:")
+        print("  - Phrases contain mixed audio from both speakers (gap too short)")
+        print("  - Single microphone far from speakers (room acoustics dominate)")
+        print("  - Speakers genuinely sound similar to the model")
+        print("  Try: --speakers 2  (force 2 clusters regardless of distance)")
 
 
 def sweep(data, lo=0.2, hi=1.0, step=0.05):
@@ -114,10 +170,10 @@ def main():
     parser = argparse.ArgumentParser(
         description="Re-run diarization with different parameters",
         epilog="Examples:\n"
+               "  %(prog)s myproject --debug                    # inspect embeddings and distances\n"
                "  %(prog)s myproject --sweep                    # see threshold→speakers table\n"
-               "  %(prog)s myproject --cluster-threshold 0.4    # re-diarize with chosen threshold\n"
                "  %(prog)s myproject --speakers 2               # force 2 speakers\n"
-               "  %(prog)s myproject --session session_20260624_143000.pkl --speakers 3\n",
+               "  %(prog)s myproject --cluster-threshold 0.4    # re-diarize with chosen threshold\n",
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     parser.add_argument("project", help="Project name")
@@ -134,10 +190,18 @@ def main():
         "--sweep", action="store_true",
         help="Show number of speakers for a range of thresholds, then exit",
     )
+    parser.add_argument(
+        "--debug", action="store_true",
+        help="Show embedding diagnostics (window count, durations, distance matrix)",
+    )
     args = parser.parse_args()
 
     project_dir = Path("projects") / args.project
     data = load_session(project_dir, args.session)
+
+    if args.debug:
+        debug_session(data)
+        return
 
     if args.sweep:
         sweep(data)
