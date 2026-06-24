@@ -9,9 +9,7 @@ from pathlib import Path
 
 from google import genai
 
-TRANSCRIPTS_DIR = Path("transcripts")
-SCREENSHOTS_DIR = Path("screenshots")
-DOCS_DIR = Path("docs")
+PROJECTS_DIR = Path("projects")
 
 MODEL = "gemini-2.5-flash"
 
@@ -183,17 +181,24 @@ def main():
     parser = argparse.ArgumentParser(
         description="Process transcripts through Gemini",
         epilog="Examples:\n"
-               "  %(prog)s 2026-06-18\n"
-               "  %(prog)s 2026-06-17 --to 2026-06-18\n"
-               "  %(prog)s 2026-06-18 --time-from 00:10 --time-to 00:20\n",
+               "  %(prog)s myproject 2026-06-18\n"
+               "  %(prog)s myproject 2026-06-17 --to 2026-06-18\n"
+               "  %(prog)s myproject 2026-06-18 --time-from 00:10 --time-to 00:20\n",
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
+    parser.add_argument("project", help="Project name")
     parser.add_argument("date", help="Start date YYYY-MM-DD")
     parser.add_argument("--to", dest="date_to", help="End date YYYY-MM-DD (optional, inclusive)")
     parser.add_argument("--time-from", dest="time_from", help="Start time HH:MM (optional)")
     parser.add_argument("--time-to", dest="time_to", help="End time HH:MM (optional)")
     parser.add_argument("--model", default=MODEL, help=f"Gemini model (default: {MODEL})")
     args = parser.parse_args()
+
+    # Project directories
+    project_dir = PROJECTS_DIR / args.project
+    transcripts_dir = project_dir / "transcripts"
+    screenshots_dir = project_dir / "screenshots"
+    docs_dir = project_dir / "docs"
 
     # Parse dates
     try:
@@ -235,11 +240,11 @@ def main():
         tf = time_from if date_str == date_strings[0] else None
         tt = time_to if date_str == date_strings[-1] else None
 
-        t = collect_files(TRANSCRIPTS_DIR, "transcript", date_str, tf, tt)
+        t = collect_files(transcripts_dir, "transcript", date_str, tf, tt)
         if t:
             transcript_parts.append(t)
 
-        s = collect_files(SCREENSHOTS_DIR, "screenshot", date_str, tf, tt, deduplicate=True)
+        s = collect_files(screenshots_dir, "screenshot", date_str, tf, tt, deduplicate=True)
         if s:
             for block in s.split("\n\n"):
                 if block not in screenshot_parts_seen:
@@ -287,10 +292,10 @@ def main():
         slug = "transcript"
 
     # Save result
-    DOCS_DIR.mkdir(exist_ok=True)
+    docs_dir.mkdir(parents=True, exist_ok=True)
     date_prefix = args.date if not args.date_to else f"{args.date}--{args.date_to}"
     base_name = f"{date_prefix}-{slug}"
-    output_path = DOCS_DIR / f"{base_name}.txt"
+    output_path = docs_dir / f"{base_name}.txt"
     output_path.write_text(clean_text, encoding="utf-8")
     print(f"Saved: {output_path}")
 
@@ -307,7 +312,7 @@ def main():
     if html_text.endswith("```"):
         html_text = html_text.rsplit("```", 1)[0].rstrip()
 
-    html_path = DOCS_DIR / f"{base_name}.html"
+    html_path = docs_dir / f"{base_name}.html"
     html_path.write_text(html_text, encoding="utf-8")
     print(f"Saved: {html_path}")
 
