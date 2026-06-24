@@ -40,7 +40,8 @@ SCREENSHOT_HELPER = Path(__file__).parent / "screenshot_helper"
 BEAM_SIZE = 5
 
 # ── Diarization config ──────────────────────────────────────────────────────
-PHRASE_GAP_SEC = 0.6       # gap between words to split phrases for embedding
+PHRASE_GAP_SEC = 0.4       # gap between words to force a phrase split
+EMBED_CHUNK_SEC = 3.0      # max phrase duration before forced split (at word boundary)
 MIN_PHRASE_AUDIO_SEC = 1.0 # min audio duration for reliable speaker embedding
 
 # ── Globals ──────────────────────────────────────────────────────────────────
@@ -196,10 +197,13 @@ def transcription_worker(whisper_model, output_file, session_data, enable_diariz
                         words=asr_words,
                     ))
 
-                    # Group words into phrases and submit for speaker embedding
+                    # Group words into phrases: split on gaps OR max duration
                     phrases = [[asr_words[0]]]
                     for w in asr_words[1:]:
-                        if w.t_start - phrases[-1][-1].t_end > PHRASE_GAP_SEC:
+                        prev = phrases[-1][-1]
+                        phrase_dur = w.t_end - phrases[-1][0].t_start
+                        gap = w.t_start - prev.t_end
+                        if gap > PHRASE_GAP_SEC or phrase_dur > EMBED_CHUNK_SEC:
                             phrases.append([w])
                         else:
                             phrases[-1].append(w)
