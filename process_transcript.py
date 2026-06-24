@@ -11,7 +11,7 @@ from google import genai
 
 PROJECTS_DIR = Path("projects")
 
-MODEL = "gemini-2.5-flash"
+MODEL = "gemini-3.1-flash-lite"
 
 PROMPT = """\
 Твоя задача — преобразовать СЫРОЙ ТРАНСКРИПТ распознавания речи в чистый, читаемый текст.
