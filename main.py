@@ -523,6 +523,7 @@ def main():
 
     parser = argparse.ArgumentParser(description="Real-time Russian speech-to-text")
     parser.add_argument("project", help="Project name (isolated directory for outputs)")
+    parser.add_argument("minutes", type=float, help="Auto-stop after this many minutes")
     parser.add_argument("--save-audio", action="store_true", help="Save audio recording as MP3")
     parser.add_argument(
         "--lang", type=str, default=LANGUAGE,
@@ -647,12 +648,22 @@ def main():
         target=helper_reader, args=(screenshot_proc,), daemon=True
     )
     helper_thread.start()
-    print(f"Listening on default microphone (Ctrl+C to stop)...")
+    # Auto-stop timer
+    auto_stop_sec = args.minutes * 60
+    auto_stop_timer = threading.Timer(auto_stop_sec, lambda: (
+        print(f"\n[auto-stop] {args.minutes} min elapsed, finalizing..."),
+        stop_event.set(),
+    ))
+    auto_stop_timer.daemon = True
+    auto_stop_timer.start()
+
+    print(f"Listening on default microphone (auto-stop in {args.minutes} min, Ctrl+C to stop early)...")
     print(f"Ctrl+Shift+S: screenshot, Ctrl+Shift+W: selection")
 
     try:
         vad_loop(vad_model)
     finally:
+        auto_stop_timer.cancel()
         screenshot_proc.terminate()
         stream.stop()
         stream.close()

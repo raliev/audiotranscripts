@@ -1,17 +1,79 @@
 #!/usr/bin/env python3
-"""Process raw transcripts + OCR texts through Gemini to produce a clean document."""
+"""Process raw transcripts + OCR texts through LLM to produce a clean document."""
 
 import argparse
 import os
+import re
 import sys
 from datetime import datetime
 from pathlib import Path
 
-from google import genai
-
 PROJECTS_DIR = Path("projects")
+INLINE_TS_RE = re.compile(r'^\[(\d{2}:\d{2}:\d{2})\]')
 
-MODEL = "gemini-3.1-flash-lite"
+PROVIDER_DEFAULTS = {
+    "gemini": "gemini-3.5-flash",
+    "openai": "gpt-4.1-mini",
+    "openrouter": "google/gemini-2.5-flash",
+}
+
+
+def detect_provider(model: str | None) -> str:
+    """Auto-detect provider from model name or available API keys."""
+    if model:
+        if model.startswith("gemini"):
+            return "gemini"
+        if model.startswith(("gpt", "o1", "o3", "o4", "chatgpt")):
+            return "openai"
+    # Fall back to available API keys
+    if os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY"):
+        return "gemini"
+    if os.environ.get("OPENAI_API_KEY"):
+        return "openai"
+    if os.environ.get("OPENROUTER_API_KEY"):
+        return "openrouter"
+    return "gemini"  # will fail later with a clear message
+
+
+def make_client(provider: str):
+    """Create an API client for the given provider."""
+    if provider == "gemini":
+        from google import genai
+        api_key = os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY")
+        if not api_key:
+            print("Set GEMINI_API_KEY or GOOGLE_API_KEY environment variable", file=sys.stderr)
+            sys.exit(1)
+        return genai.Client(api_key=api_key)
+    elif provider == "openai":
+        from openai import OpenAI
+        api_key = os.environ.get("OPENAI_API_KEY")
+        if not api_key:
+            print("Set OPENAI_API_KEY environment variable", file=sys.stderr)
+            sys.exit(1)
+        return OpenAI(api_key=api_key)
+    elif provider == "openrouter":
+        from openai import OpenAI
+        api_key = os.environ.get("OPENROUTER_API_KEY")
+        if not api_key:
+            print("Set OPENROUTER_API_KEY environment variable", file=sys.stderr)
+            sys.exit(1)
+        return OpenAI(api_key=api_key, base_url="https://openrouter.ai/api/v1")
+    else:
+        print(f"Unknown provider: {provider}", file=sys.stderr)
+        sys.exit(1)
+
+
+def generate(client, provider: str, model: str, prompt: str) -> str:
+    """Generate text using the given provider."""
+    if provider == "gemini":
+        response = client.models.generate_content(model=model, contents=prompt)
+        return response.text.strip()
+    else:  # openai / openrouter
+        response = client.chat.completions.create(
+            model=model,
+            messages=[{"role": "user", "content": prompt}],
+        )
+        return response.choices[0].message.content.strip()
 
 PROMPT = """\
 Твоя задача — преобразовать СЫРОЙ ТРАНСКРИПТ распознавания речи в чистый, читаемый текст.
@@ -147,6 +209,23 @@ NAME_PROMPT = """\
 """
 
 
+def filter_content_by_time(content: str, time_from: str | None, time_to: str | None) -> str:
+    """Filter lines by inline [HH:MM:SS] timestamps."""
+    if not time_from and not time_to:
+        return content
+    lines = content.split('\n')
+    filtered = []
+    include = True
+    for line in lines:
+        m = INLINE_TS_RE.match(line)
+        if m:
+            ts = m.group(1).replace(':', '')  # HHMMSS
+            include = (not time_from or ts >= time_from) and (not time_to or ts <= time_to)
+        if include:
+            filtered.append(line)
+    return '\n'.join(filtered).strip()
+
+
 def collect_files(directory: Path, prefix: str, date_str: str,
                   time_from: str | None, time_to: str | None,
                   deduplicate: bool = False) -> str:
@@ -161,18 +240,24 @@ def collect_files(directory: Path, prefix: str, date_str: str,
                 time_part = name_parts[i + 1][:6]  # HHMMSS
                 break
 
-        if time_part and time_from and time_part < time_from:
-            continue
+        # Skip files that started after time_to (can't contain relevant content)
         if time_part and time_to and time_part > time_to:
             continue
 
         content = f.read_text(encoding="utf-8").strip()
-        if content:
-            if deduplicate:
-                if content in seen:
-                    continue
-                seen.add(content)
-            parts.append(content)
+        if not content:
+            continue
+
+        # Filter by inline timestamps within the file
+        content = filter_content_by_time(content, time_from, time_to)
+        if not content:
+            continue
+
+        if deduplicate:
+            if content in seen:
+                continue
+            seen.add(content)
+        parts.append(content)
 
     return "\n\n".join(parts)
 
@@ -191,7 +276,9 @@ def main():
     parser.add_argument("--to", dest="date_to", help="End date YYYY-MM-DD (optional, inclusive)")
     parser.add_argument("--time-from", dest="time_from", help="Start time HH:MM (optional)")
     parser.add_argument("--time-to", dest="time_to", help="End time HH:MM (optional)")
-    parser.add_argument("--model", default=MODEL, help=f"Gemini model (default: {MODEL})")
+    parser.add_argument("--model", default=None, help="Model name (default: auto per provider)")
+    parser.add_argument("--provider", choices=["gemini", "openai", "openrouter"],
+                        default=None, help="API provider (default: auto-detect)")
     args = parser.parse_args()
 
     # Project directories
@@ -268,24 +355,18 @@ def main():
         screenshots=screenshot_text if screenshot_text else "(нет скриншотов)",
     )
 
-    # Call Gemini
-    api_key = os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY")
-    if not api_key:
-        print("Set GEMINI_API_KEY or GOOGLE_API_KEY environment variable", file=sys.stderr)
-        sys.exit(1)
-    client = genai.Client(api_key=api_key)
+    # Detect provider and model
+    provider = args.provider or detect_provider(args.model)
+    model = args.model or PROVIDER_DEFAULTS[provider]
+    client = make_client(provider)
 
-    print(f"Sending to {args.model}...")
-    response = client.models.generate_content(model=args.model, contents=prompt)
-    clean_text = response.text.strip()
+    print(f"Sending to {model} ({provider})...")
+    clean_text = generate(client, provider, model, prompt)
 
     # Ask for a name
     print("Generating filename...")
-    name_response = client.models.generate_content(
-        model=args.model,
-        contents=NAME_PROMPT.format(text=clean_text[:2000]),
-    )
-    slug = name_response.text.strip().lower().replace(" ", "-")
+    slug = generate(client, provider, model, NAME_PROMPT.format(text=clean_text[:2000]))
+    slug = slug.lower().replace(" ", "-")
     # Sanitize slug
     slug = "".join(c for c in slug if c.isalnum() or c == "-").strip("-")
     if not slug:
@@ -301,11 +382,7 @@ def main():
 
     # Generate HTML version
     print("Generating HTML...")
-    html_response = client.models.generate_content(
-        model=args.model,
-        contents=HTML_PROMPT.replace("{text}", clean_text),
-    )
-    html_text = html_response.text.strip()
+    html_text = generate(client, provider, model, HTML_PROMPT.replace("{text}", clean_text))
     # Strip markdown code fences if present
     if html_text.startswith("```"):
         html_text = html_text.split("\n", 1)[1]
