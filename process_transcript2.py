@@ -2,6 +2,7 @@
 """Process raw transcripts + OCR texts through LLM to produce a clean document."""
 
 import argparse
+import base64
 import os
 import re
 import sys
@@ -48,8 +49,13 @@ Requirements:
 - Responsive Layout: Design fluid widths, container margins, and tap-targets ensuring a high-end desktop and mobile experience.
 - The interface must feature three distinct tabs:
   1. "Overview & Decisions" - Presenting metadata cards, key takeaways, participant tags, and a beautifully styled action items table.
-  2. "Architecture & Visual Layout" - A visual mock wireframe illustrating the slot configurations (use styled dashed elements and page level slot blocks to match the discussed PLP/CMS systems).
-  3. "Transcript" - Containing a live search input box, speaker-specific filtering pill buttons, and the chronological conversation blocks with timestamps and speaker avatars/badges.
+  2. "Transcript" - Containing a live search input box, speaker-specific filtering pill buttons, and the chronological conversation blocks with timestamps and speaker avatars/badges.
+
+CRITICAL OUTPUT RULES:
+- Output ONE complete static HTML file only. No markdown code fences.
+- The transcript entries MUST be written as literal, static HTML — one `<article class="dialog-bubble">` element per line of dialogue, with the speaker, timestamp and text already filled in as plain HTML text.
+- DO NOT use JavaScript template literals, `${...}` interpolation, IIFEs (`(() => {...})()`), `.map()`/`.forEach()` rendering, frameworks, or any client-side/runtime rendering to build the transcript or any other content. This is a plain static file, not a JS app — any `${...}` you write will appear to the user as raw code.
+- JavaScript is allowed ONLY for the interactive behavior (tab switching, speaker filtering, live search) inside the `<script>` tag, exactly as in the skeleton below.
 
 Use the style patterns and logic shown in this skeleton:
 
@@ -375,6 +381,163 @@ def collect_files(directory: Path, prefix: str, date_str: str,
     return "\n\n".join(parts)
 
 
+def collect_screenshot_images(directory: Path, date_strings: list[str],
+                              time_from: str | None, time_to: str | None) -> list[tuple[str, str]]:
+    """Collect PNG screenshots and return list of (HH:MM:SS, base64_data)."""
+    images = []
+    for date_str in date_strings:
+        tf = time_from if date_str == date_strings[0] else None
+        tt = time_to if date_str == date_strings[-1] else None
+        for f in sorted(directory.glob(f"screenshot_{date_str}_*.png")):
+            parts = f.stem.split("_")
+            time_part = None
+            for i, p in enumerate(parts):
+                if p == date_str and i + 1 < len(parts):
+                    time_part = parts[i + 1][:6]
+                    break
+            if time_part:
+                if tf and time_part < tf:
+                    continue
+                if tt and time_part > tt:
+                    continue
+            ts = f"{time_part[:2]}:{time_part[2:4]}:{time_part[4:6]}" if time_part and len(time_part) >= 6 else "00:00:00"
+            data = base64.b64encode(f.read_bytes()).decode("ascii")
+            images.append((ts, data))
+    return images
+
+
+SCREENSHOT_INJECT_JS = """
+<script>
+(function(){
+    var ss = %s;
+    var bubbles = document.querySelectorAll('.dialog-bubble');
+    if (!bubbles.length || !ss.length) return;
+    var entries = [];
+    bubbles.forEach(function(b) {
+        var t = b.querySelector('.dialog-time');
+        if (t) {
+            var m = t.textContent.match(/(\\d{2}:\\d{2}:\\d{2})/);
+            if (m) entries.push({el: b, time: m[1]});
+        }
+    });
+    ss.forEach(function(s) {
+        var target = null;
+        for (var i = entries.length - 1; i >= 0; i--) {
+            if (entries[i].time <= s.t) { target = entries[i].el; break; }
+        }
+        var div = document.createElement('div');
+        div.style.cssText = 'margin:12px 0 16px 0;text-align:center;';
+        div.innerHTML = '<img src="data:image/png;base64,' + s.d + '" style="max-width:100%%;border-radius:8px;box-shadow:0 2px 8px rgba(0,0,0,0.12);">' +
+            '<div style="font-size:0.75rem;color:#64748b;margin-top:4px;">Screenshot ' + s.t + '</div>';
+        if (target && target.nextSibling) target.parentNode.insertBefore(div, target.nextSibling);
+        else if (target) target.parentNode.appendChild(div);
+        else if (entries.length) entries[0].el.parentNode.insertBefore(div, entries[0].el);
+    });
+})();
+</script>
+"""
+
+
+def _find_template_end(s: str, open_idx: int) -> int | None:
+    """Given index of '$' in a '${' at open_idx, return index just past the
+    matching '}'. JS string/template-literal aware. None if unmatched."""
+    i = open_idx + 2  # skip past ${
+    depth = 1
+    n = len(s)
+    while i < n:
+        c = s[i]
+        if c in "\"'":
+            quote = c
+            i += 1
+            while i < n:
+                if s[i] == "\\":
+                    i += 2
+                    continue
+                if s[i] == quote:
+                    i += 1
+                    break
+                i += 1
+            continue
+        if c == "`":
+            i += 1
+            while i < n:
+                if s[i] == "\\":
+                    i += 2
+                    continue
+                if s[i] == "`":
+                    i += 1
+                    break
+                if s[i] == "$" and i + 1 < n and s[i + 1] == "{":
+                    end = _find_template_end(s, i)
+                    if end is None:
+                        return None
+                    i = end
+                    continue
+                i += 1
+            continue
+        if c == "{":
+            depth += 1
+        elif c == "}":
+            depth -= 1
+            if depth == 0:
+                return i + 1
+        i += 1
+    return None
+
+
+def fix_unrendered_templates(html: str) -> str:
+    """Weak models sometimes emit JS template-literal interpolations
+    (`${(() => {...})()}`) as literal text in the HTML body instead of static
+    markup, so the browser shows raw code. Detect such interpolations outside
+    <script> blocks, replace them with placeholders, and move the expressions
+    into an inline script that renders them via innerHTML at load time."""
+    script_spans = [
+        (m.start(), m.end())
+        for m in re.finditer(r"<script\b[^>]*>.*?</script>", html, re.I | re.S)
+    ]
+
+    def in_script(pos: int) -> bool:
+        return any(a <= pos < b for a, b in script_spans)
+
+    out = []
+    injects = []
+    i = 0
+    n = len(html)
+    counter = 0
+    while i < n:
+        if html[i] == "$" and i + 1 < n and html[i + 1] == "{" and not in_script(i):
+            end = _find_template_end(html, i)
+            if end is not None:
+                expr = html[i + 2 : end - 1]
+                counter += 1
+                pid = f"__tpl_{counter}"
+                out.append(f'<div id="{pid}"></div>')
+                injects.append((pid, expr))
+                i = end
+                continue
+        out.append(html[i])
+        i += 1
+
+    if not injects:
+        return html
+
+    new_html = "".join(out)
+    lines = ["<script>", "(function(){"]
+    for pid, expr in injects:
+        safe_expr = re.sub(r"</(script)", r"<\\/\1", expr, flags=re.I)
+        lines.append(
+            f"  try {{ document.getElementById({pid!r}).innerHTML = ({safe_expr}); }}"
+            f" catch (e) {{ console.error('template render failed', e); }}"
+        )
+    lines.append("})();")
+    lines.append("</script>")
+    script = "\n".join(lines)
+
+    if "</body>" in new_html:
+        return new_html.replace("</body>", script + "\n</body>", 1)
+    return new_html + script
+
+
 def detect_provider(model: str | None) -> str:
     """Auto-detect provider from model name or available API keys."""
     if model:
@@ -505,6 +668,10 @@ def main():
     transcript_text = "\n\n".join(transcript_parts)
     screenshot_text = "\n\n".join(screenshot_parts)
 
+    screenshot_images = collect_screenshot_images(
+        screenshots_dir, date_strings, time_from, time_to)
+    print(f"Screenshot images: {len(screenshot_images)}")
+
     if not transcript_text:
         date_range = args.date if not args.date_to else f"{args.date} — {args.date_to}"
         print(f"No transcripts found for {date_range}", file=sys.stderr)
@@ -546,9 +713,24 @@ def main():
     if html_text.endswith("```"):
         html_text = html_text.rsplit("```", 1)[0].rstrip()
 
+    html_text = fix_unrendered_templates(html_text)
+
     html_path = docs_dir / f"{base_name}.html"
     html_path.write_text(html_text, encoding="utf-8")
     print(f"Saved interactive visual dashboard: {html_path}")
+
+    if screenshot_images:
+        import json
+        ss_json = json.dumps([{"t": t, "d": d} for t, d in screenshot_images])
+        inject = SCREENSHOT_INJECT_JS % ss_json
+        # Insert script before </body>
+        if "</body>" in html_text:
+            html_with_ss = html_text.replace("</body>", inject + "\n</body>")
+        else:
+            html_with_ss = html_text + inject
+        ss_html_path = docs_dir / f"{base_name}-screenshots.html"
+        ss_html_path.write_text(html_with_ss, encoding="utf-8")
+        print(f"Saved dashboard with screenshots: {ss_html_path}")
 
 
 if __name__ == "__main__":
