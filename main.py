@@ -9,6 +9,7 @@ import subprocess
 import sys
 import threading
 import queue
+import re
 from datetime import datetime, timedelta
 from pathlib import Path
 
@@ -17,6 +18,8 @@ import sounddevice as sd
 import torch
 import easyocr
 from faster_whisper import WhisperModel
+
+from events import events
 
 try:
     from speaker_id import (
@@ -59,10 +62,12 @@ save_audio_flag = False
 def load_models():
     """Load Whisper model and Silero VAD."""
     print(f"Loading Whisper model '{MODEL_SIZE}' (device={DEVICE}, compute={COMPUTE_TYPE})...")
+    events.emit("status", state="loading", detail=f"Loading Whisper {MODEL_SIZE}")
     whisper_model = WhisperModel(MODEL_SIZE, device=DEVICE, compute_type=COMPUTE_TYPE)
     print("Whisper model loaded.")
 
     print("Loading Silero VAD...")
+    events.emit("status", state="loading", detail="Loading Silero VAD")
     vad_model, utils = torch.hub.load(
         repo_or_dir="snakers4/silero-vad",
         model="silero_vad",
@@ -78,6 +83,8 @@ def audio_callback(indata, frames, time_info, status):
         print(f"[audio] {status}", file=sys.stderr)
     data = indata[:, 0].copy()
     audio_queue.put(data)
+    if events.enabled:
+        events.emit_throttled("level", 0.08, "level", rms=float(np.sqrt(np.mean(data * data))))
     if save_audio_flag:
         audio_chunks.append(data)
 
@@ -96,6 +103,12 @@ def flush_pending_injections(output_file, session_data):
         output_file.write(f"[{wall_time}] {marker}\n")
         output_file.flush()
         session_data["injections"].append((t_rel, marker))
+        if marker.startswith("[screenshot: "):
+            events.emit("injection", kind="screenshot", time=wall_time,
+                        path=marker[len("[screenshot: "):-1])
+        elif marker.startswith("[selection: "):
+            events.emit("injection", kind="selection", time=wall_time,
+                        text=marker[len("[selection: "):-1])
 
 
 def detect_language(words, threshold=0.8):
@@ -110,6 +123,36 @@ def detect_language(words, threshold=0.8):
     if ratio <= 1 - threshold:
         return "en"
     return None
+
+
+# ── Vocabulary hints (--vocab-file) ────────────────────────────────────────
+VOCAB_RE = re.compile(r'^\s*[-*]\s*"(.+?)"\s*(?:→|->)\s*"(.+?)"')
+MAX_HOTWORDS_CHARS = 400
+vocab_path: Path | None = None
+_vocab_cache = {"mtime": None, "hotwords": None}
+
+
+def current_hotwords() -> str | None:
+    """Correct spellings from '- "heard" → "meant"' lines in the vocab file,
+    re-read whenever the file changes. Passed to Whisper as hotwords."""
+    if vocab_path is None:
+        return None
+    try:
+        mtime = vocab_path.stat().st_mtime
+    except OSError:
+        return None
+    if mtime != _vocab_cache["mtime"]:
+        terms = []
+        for line in vocab_path.read_text(encoding="utf-8", errors="replace").splitlines():
+            m = VOCAB_RE.match(line)
+            if m and m.group(2) not in terms:
+                terms.append(m.group(2))
+        hw = ", ".join(terms)[:MAX_HOTWORDS_CHARS].rsplit(",", 1)[0] if terms else ""
+        _vocab_cache.update(mtime=mtime, hotwords=hw or None)
+        if hw:
+            sys.stdout.write(f"\r\033[K[vocab] {len(terms)} hint(s) loaded\n")
+            sys.stdout.flush()
+    return _vocab_cache["hotwords"]
 
 
 # ── Language detection config ──────────────────────────────────────────────
@@ -143,6 +186,8 @@ def transcription_worker(whisper_model, output_file, session_data, enable_diariz
         duration = len(segment_audio) / SAMPLE_RATE
         sys.stdout.write(f"\r\033[K[transcribing {duration:.1f}s...] ")
         sys.stdout.flush()
+        events.emit("transcribing", t=round(seg_t_start, 2), duration=round(duration, 1),
+                    queued=transcribe_queue.qsize())
 
         try:
             segments, info = whisper_model.transcribe(
@@ -151,6 +196,7 @@ def transcription_worker(whisper_model, output_file, session_data, enable_diariz
                 beam_size=BEAM_SIZE,
                 vad_filter=False,
                 word_timestamps=enable_diarization,
+                hotwords=current_hotwords(),
             )
 
             # Wall-clock timestamp derived from sample-accurate time
@@ -174,6 +220,10 @@ def transcription_worker(whisper_model, output_file, session_data, enable_diariz
                     output_file.write(text + " ")
                     has_text = True
                     seg_texts.append(text)
+                if events.enabled:
+                    events.emit("transcribe_progress", t=round(seg_t_start, 2),
+                                done=round(min(seg.end, duration), 1), duration=round(duration, 1),
+                                text=text)
 
                 # Collect word-level data for diarization
                 if enable_diarization and seg.words:
@@ -191,6 +241,8 @@ def transcription_worker(whisper_model, output_file, session_data, enable_diariz
                 sys.stdout.flush()
                 output_file.write("\n")
                 output_file.flush()
+                events.emit("segment", time=timestamp, text=" ".join(seg_texts),
+                            t=round(seg_t_start, 2), duration=round(duration, 1))
 
                 if enable_diarization and asr_words:
                     session_data["segments"].append(AsrSegment(
@@ -228,6 +280,7 @@ def transcription_worker(whisper_model, output_file, session_data, enable_diariz
             else:
                 sys.stdout.write("\r\033[K")
                 sys.stdout.flush()
+                events.emit("segment_empty")
 
             # Language auto-detection
             if lang_mode == "auto" and seg_texts:
@@ -241,12 +294,15 @@ def transcription_worker(whisper_model, output_file, session_data, enable_diariz
                         current_lang = new_lang
                         sys.stdout.write(f"\r\033[K[lang] detected: {current_lang}\n")
                         sys.stdout.flush()
+                        events.emit("lang", lang=current_lang)
                     next_lang_check = len(lang_words) + LANG_RECHECK_INTERVAL
 
         except Exception as e:
             print(f"\r\033[K[transcription error] {e}", file=sys.stderr)
+            events.emit("error", where="transcription", message=str(e))
         finally:
             transcribe_queue.task_done()
+            events.emit("chunk_done", t=round(seg_t_start, 2), queued=transcribe_queue.qsize())
         flush_pending_injections(output_file, session_data)
 
 
@@ -268,6 +324,7 @@ def embed_worker(embedder, session_data):
             ))
             sys.stdout.write(f"\r\033[K[embedding] {count} phrases")
             sys.stdout.flush()
+            events.emit_throttled("embedding", 1.0, "embedding", count=count)
         except Exception as e:
             print(f"[embed error] {e}", file=sys.stderr)
         finally:
@@ -318,6 +375,7 @@ def vad_loop(vad_model):
                     silent_count = 0
                     speech_count = 0
                     speech_start_sample = samples_processed - vad_chunk_samples
+                    events.emit("speech_start")
                 speech_count += 1
                 silent_count = 0
                 speech_buffer = np.concatenate([speech_buffer, window])
@@ -325,18 +383,24 @@ def vad_loop(vad_model):
                 duration = len(speech_buffer) / SAMPLE_RATE
                 sys.stdout.write(f"\r\033[K● speech [{duration:.1f}s]")
                 sys.stdout.flush()
+                events.emit_throttled("speech", 0.25, "speech", duration=round(duration, 1))
             else:
                 if is_speaking:
                     silent_count += 1
                     speech_buffer = np.concatenate([speech_buffer, window])
 
+                    # Re-read each window so the pause can be changed while recording
+                    silence_chunks = int((SILENCE_DURATION_MS / 1000) * SAMPLE_RATE / vad_chunk_samples)
                     if silent_count >= silence_chunks:
                         sys.stdout.write("\r\033[K")
                         sys.stdout.flush()
                         # End of speech segment
-                        if speech_count >= min_speech_chunks:
-                            t_start = speech_start_sample / SAMPLE_RATE
+                        queued = speech_count >= min_speech_chunks
+                        t_start = speech_start_sample / SAMPLE_RATE
+                        if queued:
                             transcribe_queue.put((t_start, speech_buffer.copy()))
+                        events.emit("speech_end", queued=queued, t=round(t_start, 2),
+                                    duration=round(len(speech_buffer) / SAMPLE_RATE, 1))
                         speech_buffer = np.array([], dtype=np.float32)
                         is_speaking = False
                         silent_count = 0
@@ -348,6 +412,8 @@ def vad_loop(vad_model):
         sys.stdout.flush()
         t_start = speech_start_sample / SAMPLE_RATE
         transcribe_queue.put((t_start, speech_buffer.copy()))
+        events.emit("speech_end", queued=True, t=round(t_start, 2),
+                    duration=round(len(speech_buffer) / SAMPLE_RATE, 1))
 
 
 def finalize_diarization(session_data, output_path, num_speakers, cluster_threshold):
@@ -365,10 +431,12 @@ def finalize_diarization(session_data, output_path, num_speakers, cluster_thresh
         return
 
     print(f"[diarization] Clustering {len(windows)} embedding windows...")
+    events.emit("diarization", state="clustering", windows=len(windows))
     labels = cluster_and_label(windows, num_speakers, cluster_threshold)
 
     n_speakers = len(set(labels))
     print(f"[diarization] Found {n_speakers} speaker(s).")
+    events.emit("diarization", state="labeling", speakers=n_speakers)
 
     # Assign speaker labels to every word
     diarize_words(segments, windows, labels)
@@ -424,6 +492,7 @@ def finalize_diarization(session_data, output_path, num_speakers, cluster_thresh
     output_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
     print(f"[diarization] Raw transcript kept: {raw_path}")
     print(f"[diarization] Diarized transcript: {output_path}")
+    events.emit("diarization", state="done", speakers=n_speakers, path=str(output_path))
 
 
 def ocr_worker():
@@ -450,8 +519,10 @@ def ocr_worker():
             time_str = datetime.now().strftime("%H:%M:%S")
             sys.stdout.write(f"\r\033[K[{time_str}] [OCR done: {txt_path.name}]\n")
             sys.stdout.flush()
+            events.emit("ocr", path=image_path, txt=str(txt_path), chars=len(text))
         except Exception as e:
             print(f"[OCR error] {e}", file=sys.stderr)
+            events.emit("ocr_error", path=image_path, message=str(e))
         finally:
             ocr_queue.task_done()
 
@@ -467,6 +538,7 @@ def helper_reader(proc):
             marker = f"[screenshot: {path}]"
             pending_injections.put(marker)
             ocr_queue.put(path)
+            events.emit("screenshot", path=path)
         elif line.startswith("SELECTION:"):
             b64text = line[len("SELECTION:"):]
             try:
@@ -541,7 +613,22 @@ def main():
         "--cluster-threshold", type=float, default=0.6,
         help="Cosine distance threshold for auto speaker detection (default: 0.6)",
     )
+    # Used by the web UI (server.py); console mode doesn't need them.
+    parser.add_argument("--events", default=None,
+                        help="Write structured JSON-lines events to this file")
+    parser.add_argument("--control-stdin", action="store_true",
+                        help="Accept commands on stdin: SNAP (screenshot), STOP")
+    parser.add_argument("--capture-config", default=None,
+                        help="JSON capture config for the screenshot helper (area / window)")
+    parser.add_argument("--vocab-file", default=None,
+                        help='Notes file with \'- "heard" → "meant"\' lines; the correct terms are '
+                             "passed to Whisper as hints (re-read on change)")
     args = parser.parse_args()
+    if args.events:
+        events.open(args.events)
+    global vocab_path
+    if args.vocab_file:
+        vocab_path = Path(args.vocab_file)
     SILENCE_DURATION_MS = int(args.pause * 1000)
 
     # Parse diarization settings
@@ -581,12 +668,17 @@ def main():
         "windows": [],      # list[EmbeddingWindow] — filled by embed_worker
         "injections": [],   # list[(t_relative, marker_text)]
     }
+    events.emit("session", project=args.project, project_dir=str(project_dir.resolve()),
+                transcript_path=str(output_path.resolve()), timestamp=timestamp,
+                start_time=session_data["start_time"].isoformat(),
+                diarization=enable_diarization)
 
     whisper_model, vad_model = load_models()
 
     embedder = None
     if enable_diarization:
         print("Loading speaker embedding model (ECAPA-TDNN)...")
+        events.emit("status", state="loading", detail="Loading speaker model")
         embedder = SpeakerEmbedder(device=DEVICE)
         print("Speaker model loaded.")
         if num_speakers:
@@ -601,6 +693,7 @@ def main():
     # SIGINT handler
     def on_sigint(signum, frame):
         print("\nStopping...")
+        events.emit("status", state="stopping")
         stop_event.set()
 
     signal.signal(signal.SIGINT, on_sigint)
@@ -638,8 +731,12 @@ def main():
     stream.start()
 
     # Start native screenshot helper
+    helper_cmd = [str(SCREENSHOT_HELPER), str(screenshot_dir.resolve())]
+    if args.capture_config:
+        helper_cmd.append(str(Path(args.capture_config).resolve()))
     screenshot_proc = subprocess.Popen(
-        [str(SCREENSHOT_HELPER), str(screenshot_dir.resolve())],
+        helper_cmd,
+        stdin=subprocess.PIPE,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         text=True,
@@ -648,10 +745,34 @@ def main():
         target=helper_reader, args=(screenshot_proc,), daemon=True
     )
     helper_thread.start()
+
+    if args.control_stdin:
+        def control_reader():
+            for line in sys.stdin:
+                cmd = line.strip().upper()
+                if cmd == "SNAP":
+                    try:
+                        screenshot_proc.stdin.write("SNAP\n")
+                        screenshot_proc.stdin.flush()
+                    except Exception as e:
+                        print(f"[control] snap failed: {e}", file=sys.stderr)
+                elif cmd.startswith("PAUSE "):
+                    global SILENCE_DURATION_MS
+                    try:
+                        SILENCE_DURATION_MS = int(max(0.2, min(10.0, float(cmd.split()[1]))) * 1000)
+                        print(f"\r\033[K[pause] {SILENCE_DURATION_MS}ms")
+                        events.emit("pause", seconds=SILENCE_DURATION_MS / 1000)
+                    except ValueError:
+                        pass
+                elif cmd == "STOP":
+                    events.emit("status", state="stopping")
+                    stop_event.set()
+        threading.Thread(target=control_reader, daemon=True).start()
     # Auto-stop timer
     auto_stop_sec = args.minutes * 60
     auto_stop_timer = threading.Timer(auto_stop_sec, lambda: (
         print(f"\n[auto-stop] {args.minutes} min elapsed, finalizing..."),
+        events.emit("status", state="stopping", detail="auto-stop"),
         stop_event.set(),
     ))
     auto_stop_timer.daemon = True
@@ -659,6 +780,7 @@ def main():
 
     print(f"Listening on default microphone (auto-stop in {args.minutes} min, Ctrl+C to stop early)...")
     print(f"Ctrl+Shift+S: screenshot, Ctrl+Shift+W: selection")
+    events.emit("status", state="listening")
 
     try:
         vad_loop(vad_model)
@@ -667,6 +789,7 @@ def main():
         screenshot_proc.terminate()
         stream.stop()
         stream.close()
+        events.emit("status", state="finalizing", detail="Transcribing remaining speech")
         # Signal workers to finish (sentinel after all real items)
         transcribe_queue.put(None)
         transcribe_queue.join()
@@ -700,6 +823,8 @@ def main():
             )
 
         print(f"Transcript saved to: {output_path}")
+        events.emit("finished", transcript_path=str(output_path.resolve()))
+        events.close()
 
 
 if __name__ == "__main__":

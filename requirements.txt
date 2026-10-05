@@ -6,3 +6,6 @@ easyocr>=1.7.0
 # diarization (optional, needed for --speakers flag)
 speechbrain>=1.0.0
 scikit-learn>=1.0.0
+# web UI (server.py)
+fastapi>=0.110
+uvicorn[standard]>=0.29

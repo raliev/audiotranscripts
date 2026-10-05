@@ -58,7 +58,7 @@ The system runs several threads concurrently:
 3. **Transcription worker** -- dequeues speech segments, runs Whisper, writes timestamped lines to the transcript file
 4. **Embedding worker** (optional) -- computes speaker embeddings for phrase-level audio chunks for post-session diarization
 5. **OCR worker** -- processes screenshots through EasyOCR, saves recognized text alongside images
-6. **Screenshot helper** -- a native macOS binary (Swift/Carbon) that registers system-wide hotkeys and captures the screen via `CGDisplayCreateImage`
+6. **Screenshot helper** -- a native macOS binary (Swift/Carbon) that registers system-wide hotkeys and captures the full screen, an area or a single window (configurable via a JSON file it re-reads on every capture). It also provides the area/window picker overlays used by the web UI (`--select-region`, `--pick-window`, `--list-windows`, `--capture`)
 
 The screenshot helper communicates with Python through stdout: it prints `SCREENSHOT:<path>` or `SELECTION:<base64>` lines that the main process reads and injects as markers into the transcript.
 
@@ -123,6 +123,38 @@ projects/
     session_20260618_143022.pkl            # diarization data
 ```
 
+### Web UI (studio)
+
+A browser interface on top of the same recorder. The console mode above still works unchanged.
+
+```bash
+./webui.sh                      # or: python server.py  → http://127.0.0.1:8765
+VOICE_REC_PYTHON=/path/to/python ./webui.sh --port 9000 --no-browser
+```
+
+- **Start / Stop**: runs `main.py` as a subprocess. Stop sends SIGINT, exactly like Ctrl+C.
+- **Live transcript**: phrases appear as they're recognized, with a mic level meter and listening / transcribing state.
+- **Screenshots panel**: each capture shows its pipeline status: Captured → Transcript → OCR → Beautified vN. `Snap` takes one without the hotkey.
+- **Capture area**: full screen, a dragged **area**, or a specific **window**. A window is captured even when other windows cover it. Changes apply immediately, even mid-recording, so the UI itself can stay out of screenshots.
+- **Beautify**: builds a *full* annotated transcript (every utterance, real speakers, NEW / CONFIRMS / UPDATES callouts, screenshots inline) through Claude Code (`claude -p`). Every press creates a new version:
+  - *Update* (default) extends the previous version with the new material.
+  - *Full rebuild* regenerates the whole document.
+  - *Final* runs automatically when recording stops. It uses the diarized transcript and is also copied to `docs/`.
+- **Ask**: chat about the transcript (live or saved) while recording keeps running. It follows up with only the new lines.
+
+Per-project settings (gear icon) live in `projects/<name>/project.json`:
+- **Knowledge folder**: Claude Code runs there, so its MCP servers (e.g. `claude-context`) are available for callouts.
+- **Style reference**: the HTML whose look to copy. Defaults to `templates/annotated_transcript_style.html`.
+- **Context notes**: who's who, client name, terms that are often misheard.
+
+Beautify also works from the console:
+
+```bash
+python beautify.py myproject 20260928_110051 --mode full     # or: latest, --mode final
+```
+
+Files: versions in `projects/<p>/sessions/<sid>/vN.html` (+ `manifest.json`, transcript snapshots, `chat.json`, `events.jsonl`); UI state in `.webui/`.
+
 ### Re-diarization
 
 If speaker labels need tuning, re-run diarization on saved session data without re-recording:
@@ -186,4 +218,11 @@ Key constants in `main.py`:
 | `speaker_id.py` | Speaker embedding (ECAPA-TDNN) and agglomerative clustering |
 | `rediarize.py` | Re-run diarization on saved sessions with different parameters |
 | `process_transcript.py` | LLM-based transcript cleanup and HTML generation |
+| `server.py` | Web UI server (FastAPI + WebSocket); drives `main.py`, Beautify and chat |
+| `web/` | Web UI front end (static HTML/CSS/JS, no build step, Electron-ready) |
+| `beautify.py` | Full annotated transcript via Claude Code (also a console tool) |
+| `claude_cli.py` | Helpers for headless `claude -p` (stream-json parsing, progress labels) |
+| `sessions.py` | Transcript parsing, session listing, settings, beautify manifests |
+| `events.py` | Optional JSON-lines event stream from `main.py --events` |
+| `templates/annotated_transcript_style.html` | Default style reference for Beautify |
 | `requirements.txt` | Python dependencies |

@@ -1,0 +1,145 @@
+<!doctype html>
+<!--
+  STYLE REFERENCE for beautified transcripts. Copy the structure and CSS only;
+  every piece of text below is placeholder content.
+  Speaker sides: .us (our team) / .them (client / other party) / .other
+-->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Session title — Full Annotated Transcript (Mon DD, YYYY)</title>
+<style>
+  :root{
+    --bg:#f7f8fa; --panel:#ffffff; --ink:#1a1d24; --muted:#5c6470; --line:#e4e7ec;
+    --us:#0b6b5f; --us-bg:#e5f4f1; --them:#1b4f8a; --them-bg:#e8f0fb; --other:#6b4fa0; --other-bg:#f1ecfa;
+    --new-ink:#0b4fb0; --new-bg:#e7f0ff; --new-bd:#b9d3ff;
+    --confirm-ink:#1f7a3d; --confirm-bg:#e8f6ec; --confirm-bd:#b6e2c2;
+    --update-ink:#9a5a00; --update-bg:#fff3e0; --update-bd:#ffd699;
+    --time:#98a1ad;
+  }
+  @media (prefers-color-scheme: dark){
+    :root:not([data-theme="light"]){
+      --bg:#0f1216; --panel:#171b21; --ink:#e7eaef; --muted:#9aa3af; --line:#2a2f37;
+      --us:#4fd0bd; --us-bg:#123b36; --them:#7cb0ee; --them-bg:#132a44; --other:#c3a8f0; --other-bg:#2a2140;
+      --new-ink:#8fbcff; --new-bg:#132444; --new-bd:#274a80;
+      --confirm-ink:#7fd69a; --confirm-bg:#122c1c; --confirm-bd:#2c5a3b;
+      --update-ink:#f2c17a; --update-bg:#2e2413; --update-bd:#5c4623;
+      --time:#6b7480;
+    }
+  }
+  :root[data-theme="dark"]{
+      --bg:#0f1216; --panel:#171b21; --ink:#e7eaef; --muted:#9aa3af; --line:#2a2f37;
+      --us:#4fd0bd; --us-bg:#123b36; --them:#7cb0ee; --them-bg:#132a44; --other:#c3a8f0; --other-bg:#2a2140;
+      --new-ink:#8fbcff; --new-bg:#132444; --new-bd:#274a80;
+      --confirm-ink:#7fd69a; --confirm-bg:#122c1c; --confirm-bd:#2c5a3b;
+      --update-ink:#f2c17a; --update-bg:#2e2413; --update-bd:#5c4623;
+      --time:#6b7480;
+  }
+  *{box-sizing:border-box}
+  body{background:var(--bg);color:var(--ink);font:16px/1.62 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;margin:0;padding:0}
+  .wrap{max-width:840px;margin:0 auto;padding:32px 20px 96px}
+  header.doc{margin-bottom:28px}
+  h1{font-size:1.55rem;line-height:1.25;margin:0 0 6px}
+  .sub{color:var(--muted);font-size:.95rem;margin:0 0 4px}
+  .meta{color:var(--muted);font-size:.85rem}
+  .attendees,.legend{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:14px 16px;margin:18px 0}
+  .attendees h3,.legend h3{margin:0 0 10px;font-size:.78rem;letter-spacing:.06em;text-transform:uppercase;color:var(--muted)}
+  .att-row{display:flex;flex-wrap:wrap;gap:6px 10px}
+  .chip{font-size:.82rem;padding:3px 9px;border-radius:999px;white-space:nowrap}
+  .chip.us{background:var(--us-bg);color:var(--us)}
+  .chip.them{background:var(--them-bg);color:var(--them)}
+  .chip.other{background:var(--other-bg);color:var(--other)}
+  .legend .item{display:flex;gap:10px;align-items:flex-start;margin:7px 0;font-size:.9rem}
+  .badge{font-size:.72rem;font-weight:700;padding:2px 8px;border-radius:6px;white-space:nowrap;letter-spacing:.02em}
+  .badge.new{color:var(--new-ink);background:var(--new-bg);border:1px solid var(--new-bd)}
+  .badge.confirm{color:var(--confirm-ink);background:var(--confirm-bg);border:1px solid var(--confirm-bd)}
+  .badge.update{color:var(--update-ink);background:var(--update-bg);border:1px solid var(--update-bd)}
+  .hint{color:var(--muted);font-size:.82rem;margin:14px 0 26px}
+  .callout{border-radius:12px;padding:13px 15px 13px 16px;margin:16px 0;border:1px solid var(--line)}
+  .callout.new{background:var(--new-bg);border-color:var(--new-bd)}
+  .callout.confirm{background:var(--confirm-bg);border-color:var(--confirm-bd)}
+  .callout.update{background:var(--update-bg);border-color:var(--update-bd)}
+  .callout .top{display:flex;align-items:center;gap:9px;margin-bottom:5px;flex-wrap:wrap}
+  .callout .lead{font-weight:650;font-size:.95rem}
+  .callout p{margin:5px 0 0;font-size:.92rem}
+  .callout .prior{margin-top:7px;font-size:.84rem;color:var(--muted);border-left:2px solid var(--line);padding-left:10px}
+  .callout .prior b{color:var(--ink);font-weight:600}
+  .turn{margin:13px 0;padding-left:12px;border-left:2px solid var(--line)}
+  .turn .who{font-weight:700;font-size:.9rem}
+  .turn .who.us{color:var(--us)}
+  .turn .who.them{color:var(--them)}
+  .turn .who.other{color:var(--other)}
+  .turn .org{font-weight:500;font-size:.74rem;color:var(--muted);margin-left:4px}
+  .turn .time{color:var(--time);font-size:.74rem;margin-left:6px;font-variant-numeric:tabular-nums}
+  .turn p{margin:4px 0 0}
+  .section{margin:40px 0 6px;font-size:.78rem;letter-spacing:.08em;text-transform:uppercase;color:var(--muted);border-top:1px solid var(--line);padding-top:22px}
+  figure.shot{margin:18px 0;background:var(--panel);border:1px solid var(--line);border-radius:12px;overflow:hidden}
+  figure.shot img{display:block;width:100%;height:auto;cursor:zoom-in}
+  figure.shot figcaption{font-size:.8rem;color:var(--muted);padding:8px 12px;border-top:1px solid var(--line)}
+  figure.shot figcaption .time{font-variant-numeric:tabular-nums;color:var(--time);margin-right:6px}
+  footer{margin-top:48px;color:var(--muted);font-size:.8rem;border-top:1px solid var(--line);padding-top:16px}
+  code{font-size:.85em;background:var(--panel);padding:1px 5px;border-radius:4px;border:1px solid var(--line)}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<header class="doc">
+  <h1>Session title — Topic</h1>
+  <p class="sub">Full annotated transcript (verbatim, reconstructed by speaker) · one-line context</p>
+  <p class="meta">Weekday, Month DD, YYYY · HH:MM–HH:MM · Our team × Client</p>
+
+  <div class="attendees">
+    <h3>Who's speaking</h3>
+    <div class="att-row">
+      <span class="chip them">Firstname Lastname — Role (Client)</span>
+      <span class="chip us">Firstname Lastname — Role (Our team)</span>
+      <span class="chip other">Unidentified voice — context</span>
+    </div>
+  </div>
+
+  <div class="legend">
+    <h3>How to read this — the callouts</h3>
+    <div class="item"><span class="badge new">🆕 NEW</span><span>Something we did <b>not</b> have in the source material before this session.</span></div>
+    <div class="item"><span class="badge confirm">✅ CONFIRMS</span><span>Confirms / adds colour to something already documented.</span></div>
+    <div class="item"><span class="badge update">🔄 UPDATES</span><span>Changes, narrows, or <b>contradicts</b> what prior sources said — worth reconciling.</span></div>
+  </div>
+  <p class="hint">This is the <b>full</b> transcript — every topic discussed is here, reconstructed into clean speaker turns from the verbatim recording (nothing dropped; only obvious speech-to-text garbles fixed). Skim the coloured callouts for takeaways; read the turns for detail.</p>
+</header>
+
+<!-- ===== 1 ===== -->
+<div class="section">1 · Section title</div>
+
+<div class="turn"><span class="who us">Firstname Lastname</span><span class="org">Our team · Role</span><span class="time">09:32:25</span>
+<p>Full, cleaned-up wording of what was said in this turn — nothing summarized away.</p></div>
+
+<div class="turn"><span class="who them">Firstname Lastname</span><span class="org">Client</span><span class="time">09:34:01</span>
+<p>Next turn.</p></div>
+
+<figure class="shot"><img src="../../screenshots/screenshot_YYYYMMDD_HHMMSS_mmm.png" alt="What the screenshot shows" loading="lazy"><figcaption><span class="time">09:34:20</span>What is on screen and why it matters.</figcaption></figure>
+
+<aside class="callout new">
+  <div class="top"><span class="badge new">🆕 NEW</span><span class="lead">One-sentence takeaway.</span></div>
+  <p>Detail with <b>key terms</b> in bold.</p>
+  <p class="prior"><b>Prior view:</b> What we knew before (cite the source), or "not in any prior source".</p>
+</aside>
+
+<aside class="callout confirm">
+  <div class="top"><span class="badge confirm">✅ CONFIRMS</span><span class="lead">One-sentence takeaway.</span></div>
+  <p>Detail.</p>
+</aside>
+
+<aside class="callout update">
+  <div class="top"><span class="badge update">🔄 UPDATES</span><span class="lead">One-sentence takeaway.</span></div>
+  <p>Detail.</p>
+  <p class="prior"><b>Prior view:</b> What the earlier source said and how this changes it.</p>
+</aside>
+
+<footer>
+  Reconstructed from the verbatim recording (<code>transcript_YYYYMMDD_HHMMSS.txt</code>, N lines, HH:MM–HH:MM). Notes on speaker attribution and corrected speech-to-text garbles.
+</footer>
+
+</div>
+</body>
+</html>

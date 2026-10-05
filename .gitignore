@@ -1,0 +1,27 @@
+# Personal Claude Code settings (local paths, per-machine permissions)
+.claude/settings.local.json
+
+# Recordings and everything derived from them (client data)
+projects/
+transcripts/
+screenshots/
+docs/
+transcript.txt
+t.txt
+t1.html
+bu/
+backup/
+
+# Web UI local state (window titles, last project, capture preview)
+.webui/
+
+# Python
+__pycache__/
+*.pyc
+
+# macOS
+.DS_Store
+
+# IDE
+.idea/
+.vscode/
