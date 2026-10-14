@@ -133,6 +133,7 @@ button { cursor: pointer; background: none; border: 0; padding: 0; }
 .seg { display: inline-flex; background: var(--panel-2); border: 1px solid var(--line); border-radius: 9px; padding: 2px; }
 .seg button { padding: 4px 10px; border-radius: 7px; color: var(--muted); font-size: 13px; font-weight: 520; }
 .seg button.on { background: var(--raised); color: var(--ink); box-shadow: 0 1px 2px rgba(0,0,0,.12); }
+.seg button:disabled { opacity: .35; cursor: not-allowed; }
 .field {
   height: 30px; padding: 0 10px; border-radius: 8px; border: 1px solid var(--line); background: var(--panel-2);
   outline: none; transition: border-color .15s, box-shadow .15s;
@@ -512,3 +513,24 @@ kbd { display: inline-grid; place-items: center; min-width: 18px; height: 18px; 
 .chunk-text.muted { font-size: 12.5px; color: var(--faint); }
 .caret { display: inline-block; width: 7px; height: 1em; vertical-align: -2px; margin-left: 3px; background: var(--accent); border-radius: 1px; animation: blink 1s steps(1) infinite; }
 .ghost-row .pl-sub { margin-left: 2px; }
+
+/* ── Single record button states ──────────────────────────────────────────── */
+.rec-main { display: flex; flex-direction: column; gap: 4px; }
+.rec-hint { font-size: 11.5px; color: var(--faint); padding-left: 2px; white-space: nowrap; }
+.rec-hint b { color: var(--muted); font-weight: 600; }
+.link-btn { color: var(--accent); font-size: 11.5px; font-weight: 550; }
+.link-btn:hover { text-decoration: underline; }
+.rec-btn.busy, .stop-btn.busy { cursor: default; opacity: .9; filter: saturate(.85); }
+.rec-btn.busy { box-shadow: none; }
+.spin-w { width: 14px; height: 14px; border-radius: 50%; border: 2px solid rgba(255,255,255,.35); border-top-color: #fff; animation: spin .8s linear infinite; flex: none; }
+.spin-w.dark { border-color: color-mix(in srgb, var(--panel) 35%, transparent); border-top-color: var(--panel); }
+.stop-btn:disabled { cursor: default; }
+.listen-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--ok); box-shadow: 0 0 0 0 color-mix(in srgb, var(--ok) 50%, transparent); animation: ring 1.8s ease-out infinite; flex: none; }
+@keyframes ring { 0% { box-shadow: 0 0 0 0 color-mix(in srgb, var(--ok) 55%, transparent); } 100% { box-shadow: 0 0 0 9px transparent; } }
+
+/* ── Pause (mute) ─────────────────────────────────────────────────────────── */
+.mute-btn { height: 40px; border-radius: 12px; padding: 0 14px 0 11px; }
+.mute-btn.on { background: var(--warn-soft); border-color: color-mix(in srgb, var(--warn) 55%, transparent); color: var(--warn); font-weight: 620; }
+.rec-pill.paused { background: var(--warn-soft); color: var(--warn); }
+.rec-pill.paused .dot { background: var(--warn); animation: none; }
+.a-dot.paused { background: var(--warn); }

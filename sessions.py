@@ -26,6 +26,7 @@ DEFAULT_SETTINGS = {
     "chat_model": "sonnet",
     "api_model": "",                  # for the api engine; empty = provider default
     "auto_final_beautify": True,
+    "engine": "whisper",              # ASR engine: whisper | gigaam | parakeet
     "lang": "auto",
     "speakers": "auto",
     "minutes": 180,

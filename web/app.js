@@ -24,6 +24,7 @@ const st = {
   claude: true,
   unreadChat: false,
   notes: { text: '', dirty: false, path: '' },
+  starting: false,
 };
 const CLIENT_ID = Math.random().toString(36).slice(2);
 
@@ -47,6 +48,8 @@ const ICON = {
   window: '<svg viewBox="0 0 24 24" class="ico"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M3 8.5h18M6 6.3h.01M8.5 6.3h.01"/><path d="M14 13l4 4M18 13.5V17h-3.5"/></svg>',
   chat: '<svg viewBox="0 0 20 20" class="ico"><path d="M4 4.5h12a1.5 1.5 0 0 1 1.5 1.5v7a1.5 1.5 0 0 1-1.5 1.5H9l-4 3v-3H4A1.5 1.5 0 0 1 2.5 13V6A1.5 1.5 0 0 1 4 4.5z"/></svg>',
   trash: '<svg viewBox="0 0 20 20" class="ico"><path d="M4 6h12M8 6V4.5h4V6M6 6l.7 9.6a1.5 1.5 0 0 0 1.5 1.4h3.6a1.5 1.5 0 0 0 1.5-1.4L14 6M8.5 9v5M11.5 9v5"/></svg>',
+  pause: '<svg viewBox="0 0 20 20" class="ico"><path d="M7.5 5v10M12.5 5v10"/></svg>',
+  play: '<svg viewBox="0 0 20 20" class="ico"><path d="M7 5l8 5-8 5z"/></svg>',
   open: '<svg viewBox="0 0 16 16" class="ico" style="width:14px;height:14px"><path d="M9 3h4v4M13 3L7.5 8.5M11 9.5V13H3V5h3.5"/></svg>',
 };
 
@@ -212,6 +215,7 @@ async function reloadSession() {
     st.session = await api('GET', sessUrl());
     $('#sessionName').innerHTML = st.session.live ? `<span style="color:var(--rec)">●</span> Live · ${esc(sidLabel(st.sid))}` : esc(sidLabel(st.sid));
     renderTranscript(); renderShots(); renderBeautify(); renderDoc();
+    if (!recActive()) renderControl();
   } catch (e) { /* ignore */ }
 }
 
@@ -264,7 +268,7 @@ function renderSessionMenu() {
     $('#sessionName').textContent = recActive() ? 'Starting…' : 'No sessions';
     return;
   }
-  m.innerHTML = '<div class="group">Sessions</div>' + st.sessions.map(s => {
+  m.innerHTML = '<button class="mi" data-new-session="1"><span class="tick">+</span><span class="mi-main"><div class="mi-title">New session</div><div class="mi-sub">Next recording starts a fresh transcript</div></span></button><div class="sep"></div><div class="group">Sessions</div>' + st.sessions.map(s => {
     const live = recActive() && st.recorder.project === st.project && st.recorder.sid === s.sid;
     const badge = s.final ? '<span class="mini-badge final">FINAL</span>' : s.versions ? `<span class="mini-badge">v${s.versions}</span>` : '';
     return `<button class="mi ${s.sid === st.sid ? 'on' : ''}" data-sid="${esc(s.sid)}">
@@ -275,6 +279,7 @@ function renderSessionMenu() {
   }).join('');
 }
 $('#sessionMenu').addEventListener('click', e => {
+  if (e.target.closest('[data-new-session]')) { closeMenus(); newSession(); return; }
   const b = e.target.closest('.mi[data-sid]'); if (!b) return;
   closeMenus();
   selectSession(b.dataset.sid);
@@ -287,69 +292,96 @@ function renderControl() {
   const r = st.recorder, el = $('#control');
   const s = st.settings;
   const mine = r.project === st.project;
-  if (!r.active && (r.state === 'idle' || !r.state)) {
+  const idle = !r.active && (r.state === 'idle' || !r.state);
+
+  if (idle && !st.starting) {
+    // Start appends to the selected session; "New session" starts a fresh transcript.
+    const cont = st.sid && st.session && !st.session.live;
     el.innerHTML = `
-      <button class="rec-btn" id="startBtn" ${st.project ? '' : 'disabled'}><span class="dot"></span>Start recording</button>
+      <div class="rec-main">
+        <button class="rec-btn" id="recBtn" ${st.project ? '' : 'disabled'}><span class="dot"></span>Start recording</button>
+        <div class="rec-hint">${cont
+          ? `Appends to <b>${esc(sidLabel(st.sid))}</b> · <button class="link-btn" id="newSessBtn">new session instead</button>`
+          : 'Starts a new session'}</div>
+      </div>
       <div class="opt-group">
+        <div class="opt"><span class="opt-label">Engine</span>
+          <select class="field" id="engSel" title="Speech recognition model">${Object.entries(ENGINES).map(([v, e]) => `<option value="${v}" ${(s.engine || 'whisper') === v ? 'selected' : ''}>${e.name}</option>`).join('')}</select></div>
         <div class="opt"><span class="opt-label">Language</span>
-          <div class="seg" id="langSeg">${['auto', 'en', 'ru'].map(l => `<button data-v="${l}" class="${(s.lang || 'auto') === l ? 'on' : ''}">${l === 'auto' ? 'Auto' : l.toUpperCase()}</button>`).join('')}</div></div>
+          <div class="seg" id="langSeg">${['auto', 'en', 'ru'].map(l => `<button data-v="${l}" class="${(s.lang || 'auto') === l ? 'on' : ''}" ${engineBlocksLang(s.engine, l) ? `disabled title="${ENGINES.gigaam.name} recognizes Russian only"` : ''}>${l === 'auto' ? 'Auto' : l.toUpperCase()}</button>`).join('')}</div></div>
         <div class="opt"><span class="opt-label">Speakers</span>
           <select class="field" id="spkSel">${['auto', 'off', '2', '3', '4', '5', '6', '8'].map(v => `<option value="${v}" ${String(s.speakers || 'auto') === v ? 'selected' : ''}>${v === 'auto' ? 'Detect' : v === 'off' ? 'Off' : v}</option>`).join('')}</select></div>
         <div class="opt"><span class="opt-label">Auto-stop</span><input class="field num" id="minInp" type="number" min="1" value="${s.minutes || 180}"> min</div>
         ${pauseControl(s.pause || 1.5)}
         <label class="switch opt"><input type="checkbox" id="audioChk" ${s.save_audio ? 'checked' : ''}><span class="knob"></span>Save audio</label>
-      </div>
-      <div class="spacer"></div>
-      ${r.detail === 'Session finished' && mine ? '<div class="state-sub">Last session finished · ' + esc(sidLabel(r.sid)) + '</div>' : ''}`;
-    $('#startBtn').onclick = startRecording;
+      </div>`;
+    $('#recBtn').onclick = startRecording;
+    const nb = $('#newSessBtn'); if (nb) nb.onclick = newSession;
     $$('#langSeg button').forEach(b => b.onclick = () => { st.settings.lang = b.dataset.v; renderControl(); });
+    $('#engSel').onchange = e => {
+      st.settings.engine = e.target.value;
+      if (engineBlocksLang(st.settings.engine, st.settings.lang)) st.settings.lang = 'ru';
+      renderControl();
+    };
     $('#spkSel').onchange = e => { st.settings.speakers = e.target.value; };
     $('#minInp').onchange = e => { st.settings.minutes = +e.target.value || 180; };
     $('#audioChk').onchange = e => { st.settings.save_audio = e.target.checked; };
     bindPause();
     return;
   }
-  if (r.state === 'error') {
+  if (r.state === 'error' && !st.starting) {
     el.innerHTML = `<div><div class="error-text">${esc(r.error || 'Recognizer error')}</div><div class="state-sub mono" style="white-space:pre-wrap;max-height:3.2em;overflow:hidden">${esc((r.detail || '').split('\n').slice(-2).join('\n'))}</div></div>
       <div class="spacer"></div><button class="ghost-btn" id="showConsole">Show console</button><button class="ghost-btn" id="dismissErr">Dismiss</button>`;
     $('#showConsole').onclick = toggleConsole;
     $('#dismissErr').onclick = () => { st.recorder = { state: 'idle' }; renderControl(); };
     return;
   }
-  if (r.state === 'loading') {
-    el.innerHTML = `<div class="spinner"></div><div><div class="state-title">Preparing the recognizer</div><div class="state-sub">${esc(r.detail || 'Loading models…')} · first start can take a minute</div></div>
-      <div class="spacer"></div><button class="stop-btn" id="stopBtn"><span class="sq"></span>Cancel</button>`;
-    $('#stopBtn').onclick = stopRecording;
+  if (st.starting || r.state === 'loading') {
+    el.innerHTML = `
+      <button class="rec-btn busy" disabled><span class="spin-w"></span>Starting recording…</button>
+      <div><div class="state-title">Preparing the recognizer</div>
+        <div class="state-sub">${esc(r.state === 'loading' && r.detail ? r.detail : 'Launching…')} · the first start can take a minute</div></div>`;
     return;
   }
   if (r.state === 'stopping' || r.state === 'finalizing') {
-    el.innerHTML = `<div class="spinner"></div><div><div class="state-title">${r.state === 'stopping' ? 'Stopping…' : 'Finalizing session'}</div>
-      <div class="state-sub">${esc(r.detail || 'Transcribing the remaining speech')}${r.diarization ? ' · then speakers are assigned' : ''}</div></div>
+    el.innerHTML = `
+      <button class="stop-btn busy" disabled><span class="spin-w dark"></span>Stopping…</button>
+      <div><div class="state-title">${r.state === 'stopping' ? 'Finishing the last phrase' : 'Finalizing session'}</div>
+        <div class="state-sub">${esc(r.detail || 'Transcribing the remaining speech')}${r.diarization ? ' · then speakers are assigned' : ''}</div></div>
       <div class="spacer"></div><div class="state-sub">${esc(r.project)} · ${esc(sidLabel(r.sid))}</div>`;
     return;
   }
   // listening
   el.innerHTML = `
-    <div class="rec-state"><span class="rec-pill"><span class="dot"></span>REC</span><span class="timer mono" id="timer">0:00</span></div>
+    <button class="stop-btn" id="recBtn" title="Stop (same as Ctrl+C)"><span class="sq"></span>Stop recording</button>
+    <button class="ghost-btn mute-btn${r.muted ? ' on' : ''}" id="muteBtn" title="${r.muted ? 'Unmute the microphone and continue' : 'Mute the microphone; the session keeps running'}">${r.muted ? ICON.play + 'Resume' : ICON.pause + 'Pause'}</button>
+    <div class="rec-state"><span class="rec-pill${r.muted ? ' paused' : ''}"><span class="dot"></span>${r.muted ? 'PAUSED' : 'REC'}</span><span class="timer mono" id="timer">0:00</span></div>
     <canvas class="meter" id="meter" width="336" height="68"></canvas>
     <div class="pipe-status" id="pipeStatus"></div>
     ${pauseControl(st.pipeline.pause || s.pause || 1.5)}
+    ${r.engine && r.engine !== 'whisper' ? `<span class="chip" title="Speech recognition engine">${esc(ENGINES[r.engine]?.short || r.engine)}</span>` : ''}
     ${r.lang ? `<span class="chip" title="Detected language">${esc(r.lang.toUpperCase())}</span>` : ''}
     ${r.diarization ? '<span class="chip" title="Speaker diarization runs after the session">SPEAKERS</span>' : ''}
     <div class="spacer"></div>
     ${!mine ? `<span class="state-sub">Recording in <b>${esc(r.project)}</b></span>` : ''}
-    <button class="ghost-btn" id="snapBtn" title="Take a screenshot of the capture area">${ICON.camera}Snap</button>
-    <button class="stop-btn" id="stopBtn" title="Stop (same as Ctrl+C)"><span class="sq"></span>Stop</button>`;
-  $('#stopBtn').onclick = stopRecording;
+    <button class="ghost-btn" id="snapBtn" title="Take a screenshot of the capture area">${ICON.camera}Snap</button>`;
+  $('#recBtn').onclick = stopRecording;
+  $('#muteBtn').onclick = toggleMute;
   $('#snapBtn').onclick = snap;
   bindPause();
   renderPipeline();
   tickTimer();
 }
 
+function newSession() {
+  st.sid = null; st.session = null; st.chat = { messages: [], busy: false };
+  $('#sessionName').textContent = 'New session';
+  renderAll();
+}
+
 function pauseControl(v) {
   return `<div class="opt" title="How long a silence ends a phrase. Shorter: text appears sooner, in smaller pieces. Longer: fewer, longer chunks. Can be changed while recording.">
-    <span class="opt-label">Pause</span><input class="field num" id="pauseInp" type="number" min="0.2" max="10" step="0.1" value="${(+v).toFixed(1)}"> s</div>`;
+    <span class="opt-label">Phrase gap</span><input class="field num" id="pauseInp" type="number" min="0.2" max="10" step="0.1" value="${(+v).toFixed(1)}"> s</div>`;
 }
 function bindPause() {
   const inp = $('#pauseInp'); if (!inp) return;
@@ -359,7 +391,7 @@ function bindPause() {
     st.settings.pause = v;
     try {
       const r = await api('POST', '/api/record/pause', { seconds: v });
-      if (recActive()) toast(`Pause set to ${r.pause.toFixed(1)} s, applies from the next phrase`, 'ok');
+      if (recActive()) toast(`Phrase gap set to ${r.pause.toFixed(1)} s, applies from the next phrase`, 'ok');
     } catch (e) { fail(e); }
   };
 }
@@ -372,7 +404,9 @@ function renderPipeline() {
   const el = $('#pipeStatus');
   if (el) {
     const speaking = pl.speech != null;
-    const l1 = speaking
+    const l1 = st.recorder.muted
+      ? `<span class="a-dot paused"></span><b>Paused</b><span class="pl-sub">microphone muted · session continues</span>`
+      : speaking
       ? `<span class="a-dot speech"></span><b>Speech ${fmtSec(pl.speech)}</b><span class="pl-sub">recording · sent after a ${(pl.pause || 1.5).toFixed(1)} s pause</span>`
       : `<span class="a-dot"></span><b>Listening</b><span class="pl-sub">waiting for speech</span>`;
     let l2, pct = null;
@@ -429,7 +463,7 @@ function drawMeter() {
     ctx.clearRect(0, 0, w, h);
     const bw = w / n;
     const css = getComputedStyle(document.documentElement);
-    const speech = st.pipeline.speech != null;
+    const speech = st.pipeline.speech != null && !st.recorder.muted;
     ctx.fillStyle = speech ? css.getPropertyValue('--ok').trim() : css.getPropertyValue('--faint').trim();
     st.levels.forEach((v, i) => {
       const amp = Math.min(1, Math.sqrt(v) * 4.2);
@@ -448,22 +482,48 @@ function roundRect(ctx, x, y, w, h, r) {
 }
 requestAnimationFrame(drawMeter);
 
+// Speech recognition engines (main.py --engine)
+const ENGINES = {
+  whisper: { name: 'Whisper turbo', short: 'WHISPER' },
+  gigaam: { name: 'GigaAM v3 (RU)', short: 'GIGAAM', ruOnly: true },
+  parakeet: { name: 'Parakeet v3 (RU+EN)', short: 'PARAKEET' },
+};
+const engineBlocksLang = (engine, lang) => !!ENGINES[engine || 'whisper']?.ruOnly && lang === 'en';
+
 async function startRecording() {
+  if (st.starting) return;
   const s = st.settings;
+  st.starting = true;
+  renderControl();
   try {
-    const check = await api('GET', '/api/check-recorder');
+    const engine = s.engine || 'whisper';
+    if (engineBlocksLang(engine, s.lang)) s.lang = 'ru';
+    const check = await api('GET', `/api/check-recorder?engine=${encodeURIComponent(engine)}`);
     if (!check.ok) {
+      st.starting = false; renderControl();
       openSettings();
       toast(`The recognizer's Python can't load its models: ${check.error}`, 'error', 9000);
       return;
     }
     await api('POST', '/api/record/start', {
-      project: st.project, lang: s.lang || 'auto', speakers: s.speakers || 'auto',
+      project: st.project, engine, lang: s.lang || 'auto', speakers: s.speakers || 'auto',
       minutes: s.minutes || 180, pause: s.pause || 1.5, save_audio: !!s.save_audio,
+      continue_sid: st.sid && st.session && !st.session.live ? st.sid : '',
     });
-  } catch (e) { fail(e); }
+  } catch (e) { st.starting = false; renderControl(); fail(e); }
 }
-async function stopRecording() { try { await api('POST', '/api/record/stop'); } catch (e) { fail(e); } }
+async function stopRecording() {
+  if (st.recorder.state !== 'listening') return;
+  st.recorder = { ...st.recorder, state: 'stopping', detail: 'Stopping' };
+  renderControl();
+  try { await api('POST', '/api/record/stop'); } catch (e) { fail(e); }
+}
+async function toggleMute() {
+  const muted = !st.recorder.muted;
+  const btn = $('#muteBtn'); if (btn) btn.disabled = true;
+  try { await api('POST', '/api/record/mute', { muted }); }
+  catch (e) { fail(e); if (btn) btn.disabled = false; }
+}
 async function snap() { try { await api('POST', '/api/record/snap'); } catch (e) { fail(e); } }
 $('#snapSideBtn').onclick = snap;
 
@@ -505,7 +565,7 @@ function renderTranscript() {
 
 function emptyTranscript() {
   if (!st.project) return `<div class="empty"><div class="art">${ICON.mic}</div><h3>Create a project to begin</h3><p>Projects keep transcripts, screenshots and documents together.</p></div>`;
-  return `<div class="empty"><div class="art">${ICON.mic}</div><h3>Ready when you are</h3>
+  return `<div class="empty"><div class="art">${ICON.mic}</div><h3>${st.sid ? 'Ready when you are' : 'New session'}</h3>
     <p>Choose what screenshots should capture (top right), then press <b>Start recording</b>. Speech appears here as it is recognized; press <kbd>⌃</kbd><kbd>⇧</kbd><kbd>S</kbd> or <b>Snap</b> to capture the screen.</p></div>`;
 }
 
@@ -528,10 +588,23 @@ function appendEntry(idx, entry) {
 
 function renderGhost() {
   const g = $('#ghost'); if (!g) return;
+  const r = st.recorder;
+  if (!isLive() || !r.active) { g.innerHTML = ''; return; }
   const sp = st.pipeline.speech;
-  if (!isLive() || st.recorder.state !== 'listening' || sp == null) { g.innerHTML = ''; return; }
-  g.innerHTML = `<div class="row ghost-row"><span class="t">now</span><div class="body"><p><span class="wave"><i></i><i></i><i></i><i></i></span>
-    <span>Speaking · ${fmtSec(sp)}</span><span class="pl-sub">goes to transcription after a ${(st.pipeline.pause || 1.5).toFixed(1)} s pause</span></p></div></div>`;
+  let inner;
+  if (r.state === 'stopping' || r.state === 'finalizing') {
+    inner = `<span class="spinner tiny"></span><span>Finishing…</span><span class="pl-sub">${esc(r.detail || 'transcribing the remaining speech')}</span>`;
+  } else if (r.state !== 'listening') {
+    inner = `<span class="spinner tiny"></span><span>Starting…</span><span class="pl-sub">${esc(r.detail || 'loading models')}</span>`;
+  } else if (r.muted) {
+    inner = `<span class="a-dot paused"></span><span>Paused</span><span class="pl-sub">microphone is muted · press Resume to continue</span>`;
+  } else if (sp != null) {
+    inner = `<span class="wave"><i></i><i></i><i></i><i></i></span><span>Speaking · ${fmtSec(sp)}</span>
+      <span class="pl-sub">goes to transcription after a ${(st.pipeline.pause || 1.5).toFixed(1)} s pause</span>`;
+  } else {
+    inner = `<span class="listen-dot"></span><span class="shimmer">Listening…</span><span class="pl-sub">waiting for speech</span>`;
+  }
+  g.innerHTML = `<div class="row ghost-row"><span class="t">now</span><div class="body"><p>${inner}</p></div></div>`;
   if (st.follow) { const box = $('#transcript'); box.scrollTop = box.scrollHeight; }
 }
 
@@ -680,7 +753,7 @@ function lastAttempt() { const v = versions(); return v[v.length - 1] || null; }
 
 function renderBeautify() {
   const el = $('#beautifyCtl');
-  if (!st.session) { el.innerHTML = ''; return; }
+  if (!st.session) { el.innerHTML = ''; $('#versionBadge').textContent = ''; return; }
   const job = currentJob();
   const latest = latestVersion();
   const last = lastAttempt();
@@ -1001,7 +1074,7 @@ async function openSettings() {
     $('[data-close]', root).onclick = closeModal;
     $('#checkPy', root).onclick = async () => {
       await api('POST', '/api/settings', { recorder_python: $('#setPy').value.trim() });
-      const r = await api('GET', '/api/check-recorder');
+      const r = await api('GET', `/api/check-recorder?engine=${encodeURIComponent(st.settings.engine || 'whisper')}`);
       const el = $('#checkRes'); el.className = 'check-res ' + (r.ok ? 'ok' : 'bad');
       el.textContent = r.ok ? `✓ ${r.python} is ready` : `✗ ${r.error}`;
     };
@@ -1102,15 +1175,16 @@ async function handle(m) {
       const prev = st.recorder;
       st.recorder = m;
       if (m.pipeline) st.pipeline = m.pipeline;
-      // a new live session got its id → switch to it
-      if (m.active && m.sid && m.sid !== prev.sid) {
+      if (m.active || m.state === 'error') st.starting = false;
+      // a live session got its id (new, or the continued one) → show it live
+      if (m.active && m.sid && (m.sid !== prev.sid || !prev.active || !isLive())) {
         if (st.project !== m.project) { await selectProject(m.project, { keepSession: true }); }
         await loadSessions();
         await selectSession(m.sid);
         switchTab('live');
       }
-      if (m.state === 'listening' && prev.state !== 'listening') renderGhost();
       renderControl();
+      renderGhost();
       if (!m.active && prev.active) { await loadSessions(); }
       break;
     }

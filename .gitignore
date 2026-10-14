@@ -25,3 +25,6 @@ __pycache__/
 # IDE
 .idea/
 .vscode/
+
+# ASR benchmark output (transcripts of client recordings)
+bench_out/

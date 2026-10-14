@@ -34,6 +34,8 @@ import beautify
 import claude_cli
 import sessions as S
 
+ENGINES = ("whisper", "gigaam", "parakeet")   # main.py --engine (see asr_engines.py)
+
 ROOT = S.ROOT
 WEB_DIR = ROOT / "web"
 HELPER = ROOT / "screenshot_helper"
@@ -92,6 +94,7 @@ class Recorder:
         self.started_at = 0.0
         self.listening_at = 0.0
         self.lang = ""
+        self.engine = ""
         self.diarization = False
         self.error = ""
         self.entries: list[dict] = []
@@ -100,6 +103,7 @@ class Recorder:
         self.activity = {"kind": "idle"}
         self.options: dict = {}
         self.deleted: set[str] = set()
+        self.muted = False
         self.session_start: datetime | None = None
         # speech = seconds of the phrase being recorded (None = silence);
         # current = chunk Whisper is working on; pending = chunks waiting in the queue
@@ -113,8 +117,9 @@ class Recorder:
         return {
             "state": self.state, "detail": self.detail, "project": self.project, "sid": self.sid,
             "started_at": self.started_at, "listening_at": self.listening_at, "lang": self.lang,
-            "diarization": self.diarization, "error": self.error, "active": self.active,
+            "engine": self.engine, "diarization": self.diarization, "error": self.error, "active": self.active,
             "activity": self.activity, "options": self.options, "pipeline": self.pipeline,
+            "muted": self.muted,
             "minutes": self.options.get("minutes"),
         }
 
@@ -153,12 +158,31 @@ class Recorder:
                "--events", str(events_path), "--control-stdin", "--capture-config", str(CAPTURE_CONFIG),
                "--lang", str(opts.get("lang") or "auto"), "--pause", str(float(opts.get("pause") or 1.5)),
                "--vocab-file", str(S.notes_path(project).resolve())]
+        engine = str(opts.get("engine") or "whisper")
+        if engine not in ENGINES:
+            raise HTTPException(400, f"Unknown engine: {engine}")
+        if engine == "gigaam" and str(opts.get("lang") or "auto") == "en":
+            raise HTTPException(400, "GigaAM recognizes Russian only; pick Auto/RU or another engine")
+        if engine != "whisper":
+            cmd += ["--engine", engine]
+        self.engine = engine
         speakers = str(opts.get("speakers") or "off")
         if speakers != "off":
             cmd += ["--speakers", speakers]
             self.diarization = True
         if opts.get("save_audio"):
             cmd.append("--save-audio")
+        continue_sid = (opts.get("continue_sid") or "").strip()
+        if continue_sid:
+            if not S.transcript_path(project, continue_sid).exists():
+                raise HTTPException(404, "The session to continue was not found")
+            cmd += ["--continue-session", S.safe_name(continue_sid)]
+            # Show what's already there; new lines are appended live.
+            existing = S.load_session(project, continue_sid)
+            self.sid = continue_sid
+            self.transcript_path = existing["transcript_path"]
+            self.entries = existing["entries"]
+            self.shots = {s["path"]: s for s in existing["screenshots"]}
         self.pipeline["pause"] = float(opts.get("pause") or 1.5)
 
         self.log.append("$ " + " ".join(cmd[1:]))
@@ -167,7 +191,7 @@ class Recorder:
             stderr=asyncio.subprocess.STDOUT, start_new_session=True,
             env={**os.environ, "PYTHONUNBUFFERED": "1"}, limit=STREAM_LIMIT)
         S.save_settings({"last_project": project, **{k: opts[k] for k in
-                         ("lang", "speakers", "minutes", "pause", "save_audio") if k in opts}})
+                         ("engine", "lang", "speakers", "minutes", "pause", "save_audio") if k in opts}})
         self.set_state("loading", "Starting recognizer")
         loop = asyncio.get_running_loop()
         loop.create_task(self._read_output())
@@ -258,6 +282,12 @@ class Recorder:
             pl["pause"] = ev.get("seconds")
         hub.emit({"type": "pipeline", **pl})
 
+    async def set_muted(self, muted: bool):
+        if not self.active or self.state != "listening":
+            raise HTTPException(409, "Not recording")
+        self.proc.stdin.write(b"MUTE\n" if muted else b"UNMUTE\n")
+        await self.proc.stdin.drain()
+
     async def set_pause(self, seconds: float):
         if not self.active:
             return
@@ -301,6 +331,9 @@ class Recorder:
             self._pipeline(t, ev)
         elif t == "segment_empty":
             pass
+        elif t == "muted":
+            self.muted = bool(ev.get("muted"))
+            hub.emit({"type": "recorder", **self.snapshot()})
         elif t == "segment":
             entry = {"time": ev["time"], "kind": "speech", "speaker": None, "text": ev["text"]}
             self._add_entry(entry)
@@ -366,7 +399,9 @@ class Recorder:
             self.set_state("idle", "Session finished")
         if sid:
             hub.emit({"type": "session_changed", "project": project, "sid": sid, "finished": True})
-            if S.load_settings().get("auto_final_beautify") and S.transcript_path(project, sid).exists():
+            has_speech = S.transcript_path(project, sid).exists() and any(
+                e["kind"] == "speech" for e in S.parse_transcript(S.read_transcript(project, sid)))
+            if S.load_settings().get("auto_final_beautify") and has_speech:
                 try:
                     await jobs.start(project, sid, "final")
                 except HTTPException:
@@ -679,6 +714,16 @@ app.mount("/files", StaticFiles(directory=str(S.PROJECTS_DIR)), name="files")
 app.mount("/static", StaticFiles(directory=str(WEB_DIR)), name="static")
 
 
+@app.middleware("http")
+async def no_stale_frontend(request, call_next):
+    # Make the browser revalidate the UI files (cheap 304 via ETag), so an updated
+    # app.js/style.css shows up without a hard reload.
+    response = await call_next(request)
+    if request.url.path == "/" or request.url.path.startswith("/static/"):
+        response.headers["Cache-Control"] = "no-cache"
+    return response
+
+
 @app.get("/")
 async def index():
     return FileResponse(WEB_DIR / "index.html", headers={"Cache-Control": "no-cache"})
@@ -713,9 +758,10 @@ async def status():
 
 
 @app.get("/api/check-recorder")
-async def check_recorder():
+async def check_recorder(engine: str = "whisper"):
     python = S.load_settings().get("recorder_python") or sys.executable
-    rc, out, err = await run_cmd(python, "-c", "import faster_whisper, sounddevice, easyocr, torch; print('ok')")
+    asr_module = "faster_whisper" if engine == "whisper" else "onnx_asr"
+    rc, out, err = await run_cmd(python, "-c", f"import {asr_module}, sounddevice, easyocr, torch; print('ok')")
     return {"ok": rc == 0, "python": python, "error": (err or out).strip()[-300:]}
 
 
@@ -876,6 +922,12 @@ async def record_pause(data: dict = Body(...)):
     S.save_settings({"pause": seconds})
     await recorder.set_pause(seconds)
     return {"pause": seconds}
+
+
+@app.post("/api/record/mute")
+async def record_mute(data: dict = Body(...)):
+    await recorder.set_muted(bool(data.get("muted")))
+    return {"ok": True}
 
 
 @app.post("/api/record/snap")

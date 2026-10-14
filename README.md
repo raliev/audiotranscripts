@@ -6,7 +6,7 @@ Built for narrating what's on screen -- record a coding session, walkthrough, or
 
 ## Features
 
-- Real-time transcription using [faster-whisper](https://github.com/SYSTRAN/faster-whisper) (runs locally, no cloud API)
+- Real-time transcription, fully local (no cloud API), with a choice of engines: [faster-whisper](https://github.com/SYSTRAN/faster-whisper) (default), [GigaAM v3](https://github.com/salute-developers/GigaAM) or [Parakeet TDT v3](https://huggingface.co/nvidia/parakeet-tdt-0.6b-v3) via [onnx-asr](https://github.com/istupakov/onnx-asr) -- see [ASR engines](#asr-engines)
 - Voice Activity Detection via [Silero VAD](https://github.com/snakers4/silero-vad) -- only transcribes when you speak
 - Automatic language detection (Russian/English) with periodic re-evaluation
 - Global hotkeys for screenshots (`Ctrl+Shift+S`) and text selection capture (`Ctrl+Shift+W`)
@@ -29,7 +29,7 @@ Microphone -----> | sounddevice|
                   +-----------+       +--------+---------+
                                                |
                                     +----------v-----------+
-                                    | Whisper (faster-whisper)|
+                                    | ASR engine (asr_engines)|
                                     +----------+-----------+
                                                |
                          +---------------------+---------------------+
@@ -55,7 +55,7 @@ The system runs several threads concurrently:
 
 1. **Audio capture** -- `sounddevice` streams microphone input at 16kHz mono
 2. **VAD loop** (main thread) -- Silero VAD processes 32ms windows, detects speech start/end based on configurable silence threshold
-3. **Transcription worker** -- dequeues speech segments, runs Whisper, writes timestamped lines to the transcript file
+3. **Transcription worker** -- dequeues speech segments, runs the ASR engine (Whisper / GigaAM / Parakeet), writes timestamped lines to the transcript file
 4. **Embedding worker** (optional) -- computes speaker embeddings for phrase-level audio chunks for post-session diarization
 5. **OCR worker** -- processes screenshots through EasyOCR, saves recognized text alongside images
 6. **Screenshot helper** -- a native macOS binary (Swift/Carbon) that registers system-wide hotkeys and captures the full screen, an area or a single window (configurable via a JSON file it re-reads on every capture). It also provides the area/window picker overlays used by the web UI (`--select-region`, `--pick-window`, `--list-windows`, `--capture`)
@@ -103,6 +103,10 @@ python main.py myproject --save-audio
 
 # Adjust silence threshold (seconds)
 python main.py myproject --pause 2.0
+
+# Another recognition engine (see "ASR engines")
+python main.py myproject --engine gigaam
+python main.py myproject --engine parakeet --vocab-file notes.md --vocab-correct
 ```
 
 During recording:
@@ -195,13 +199,50 @@ python process_transcript.py myproject 2026-06-18 --provider openrouter
 
 Output goes to `projects/myproject/docs/` as both `.txt` and `.html`.
 
+## ASR engines
+
+`--engine` picks the speech recognizer (`asr_engines.py`). All engines feed the same transcript format and word timestamps, so diarization, screenshots and the web UI work the same with each.
+
+| Engine | Model | Languages | Notes |
+|---|---|---|---|
+| `whisper` (default) | faster-whisper `large-v3-turbo`, int8 | any, auto-detect | Supports vocab hints (`hotwords`); slowest on CPU; can hallucinate on silence |
+| `gigaam` | GigaAM v3 e2e RNN-T (`gigaam-v3-e2e-rnnt`), int8 | Russian only | Best for Russian; punctuation, ё; `--lang en` is refused |
+| `parakeet` | NVIDIA Parakeet TDT 0.6B v3, int8 | 25 European incl. ru/en, auto-detect | Good for mixed ru/en; weaker than GigaAM on Russian |
+
+- `--asr-model` overrides the model: a Whisper size, or an onnx-asr name such as `gigaam-v3-e2e-ctc`.
+- GigaAM and Parakeet have no `hotwords`. With `--vocab-correct`, `- "heard" → "meant"` lines from `--vocab-file` are applied to the output as replacements instead.
+- Long phrases are split into ≤20 s (GigaAM) / ≤60 s (Parakeet) chunks at the quietest point, since the models degrade on long input.
+- Models download into the Hugging Face cache on first use (GigaAM ~250 MB, Parakeet ~700 MB). To fetch them ahead of time:
+
+  ```bash
+  python -c "import onnx_asr; onnx_asr.load_model('gigaam-v3-e2e-rnnt', quantization='int8')"
+  python -c "import onnx_asr; onnx_asr.load_model('nemo-parakeet-tdt-0.6b-v3', quantization='int8')"
+  ```
+
+Measured on an M3 Max, CPU, 140 s of Russian speech in 7 phrases (`bench_asr.py`):
+
+| Engine | Compute | RTF | Peak RAM |
+|---|---|---|---|
+| whisper | 90.0 s | 0.64 | 2.3 GB |
+| gigaam | 4.4 s | 0.031 | 0.7 GB |
+| gigaam-ctc | 4.3 s | 0.030 | 0.6 GB |
+| parakeet | 4.8 s | 0.034 | 1.6 GB |
+
+To compare engines on your own recording (run it while the recorder is stopped):
+
+```bash
+python bench_asr.py projects/myproject/recording_20261007_083740.mp3 --start 60 --dur 300 --ref reference.txt
+```
+
+`--ref` is a hand-corrected transcript of the same range; with it the script reports WER/CER. Per-engine transcripts go to `bench_out/`.
+
 ## Configuration
 
 Key constants in `main.py`:
 
 | Parameter | Default | Description |
 |---|---|---|
-| `MODEL_SIZE` | `large-v3-turbo` | Whisper model variant |
+| `MODEL_SIZE` | `large-v3-turbo` | Whisper model variant (`--engine whisper`) |
 | `DEVICE` | `cpu` | Inference device (`cpu` or `cuda`) |
 | `COMPUTE_TYPE` | `int8` | Quantization for faster-whisper |
 | `VAD_THRESHOLD` | `0.5` | Speech probability threshold |
@@ -214,6 +255,8 @@ Key constants in `main.py`:
 | File | Purpose |
 |---|---|
 | `main.py` | Main app: audio capture, VAD, transcription, screenshot integration |
+| `asr_engines.py` | Speech recognition engines (Whisper, GigaAM, Parakeet) behind one interface |
+| `bench_asr.py` | Compare engines on a recording: speed, memory, WER/CER |
 | `screenshot_helper.swift` | Native macOS helper for global hotkeys and screen capture |
 | `speaker_id.py` | Speaker embedding (ECAPA-TDNN) and agglomerative clustering |
 | `rediarize.py` | Re-run diarization on saved sessions with different parameters |

@@ -1,4 +1,6 @@
 faster-whisper>=1.1.0
+# GigaAM / Parakeet engines (--engine gigaam|parakeet)
+onnx-asr[cpu,hub]>=0.12
 sounddevice>=0.5.0
 numpy>=1.24.0
 torch>=2.0.0
@@ -9,3 +11,5 @@ scikit-learn>=1.0.0
 # web UI (server.py)
 fastapi>=0.110
 uvicorn[standard]>=0.29
+# engine benchmark (bench_asr.py --ref)
+jiwer>=3.0
