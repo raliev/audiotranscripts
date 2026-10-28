@@ -424,7 +424,7 @@ function renderControlStrip() {
     ${isFile ? '' : minutesControl(r.minutes || s.minutes || 180)}
     ${r.engine && r.engine !== 'whisper' ? `<span class="chip" title="Speech recognition engine">${esc(ENGINES[r.engine]?.short || r.engine)}</span>` : ''}
     ${r.lang ? `<span class="chip" title="Detected language">${esc(r.lang.toUpperCase())}</span>` : ''}
-    ${r.diarization ? '<span class="chip" title="Speaker diarization runs after the session">SPEAKERS</span>' : ''}
+    ${r.diarization ? '<span class="chip" title="Speakers are numbered live and refined after the session">SPEAKERS</span>' : ''}
     ${sourceChip(r)}
     <div class="spacer"></div>
     ${!mine ? `<span class="state-sub">Recording in <b>${esc(r.project)}</b></span>` : ''}
@@ -1599,14 +1599,29 @@ function openBeautifyMenu(anchor) {
   const latest = latestVersion();
   const finished = !isLive();
   const m = $('#beautifyMenu');
+  // API engine only: a small model can't be trusted with the whole document (it fills in the style reference)
+  const layout = st.settings.api_layout || 'model';
+  const layoutItem = (v, title, sub) => `<button class="mi" data-layout="${v}"><span class="tick">${layout === v ? '✓' : ''}</span><span class="mi-main"><div class="mi-title">${title}</div><div class="mi-sub">${sub}</div></span></button>`;
+  const layouts = st.settings.beautify_engine !== 'api' ? '' : '<div class="sep"></div><div class="group">Layout</div>'
+    + layoutItem('model', 'Model writes the whole document', 'Header, styles and footer too · for strong models')
+    + layoutItem('app', 'App builds the frame', 'The model writes only the conversation · for small local models')
+    + '<div class="sep"></div>';
   m.innerHTML = `
     <button class="mi" data-mode="update" ${latest ? '' : 'disabled style="opacity:.5"'}><span class="mi-main"><div class="mi-title">Update with new material</div><div class="mi-sub">Extends v${latest ? latest.v : '-'} with new speech and screenshots · fastest</div></span></button>
     <button class="mi" data-mode="full"><span class="mi-main"><div class="mi-title">Full rebuild</div><div class="mi-sub">Regenerates the whole document from the transcript</div></span></button>
     <button class="mi" data-mode="final" ${finished ? '' : 'disabled style="opacity:.5"'}><span class="mi-main"><div class="mi-title">Final version</div><div class="mi-sub">${finished ? 'Definitive document with every speaker identified; also saved to docs/' : 'Available after the recording stops (runs automatically)'}</div></span></button>
-    <button class="mi" data-prompts="1"><span class="mi-main"><div class="mi-title">Edit prompt(s)…</div><div class="mi-sub">What Beautify asks the model to do, for this project only</div></span></button>
+    ${layouts}<button class="mi" data-prompts="1"><span class="mi-main"><div class="mi-title">Edit prompt(s)…</div><div class="mi-sub">What Beautify asks the model to do, for this project only</div></span></button>
     <button class="mi mi-ai" data-ai="1"><span class="mi-main"><div class="mi-title">AI: ${esc(st.ai ? st.ai.label : '-')}</div><div class="mi-sub">Change the provider (Claude Code, Gemini, OpenAI, …), API key, model</div></span></button>`;
   m.onclick = e => {
     if (e.target.closest('.mi[data-ai]')) { closeMenus(); openAiSetup(); return; }
+    const lb = e.target.closest('.mi[data-layout]');
+    if (lb) {
+      api('POST', '/api/settings', { api_layout: lb.dataset.layout }).then(s => {
+        st.settings = s;
+        $$('.mi[data-layout]', m).forEach(x => { $('.tick', x).textContent = x.dataset.layout === s.api_layout ? '✓' : ''; });
+      }).catch(fail);
+      return;
+    }
     if (e.target.closest('.mi[data-prompts]')) { closeMenus(); window.open(`/prompts?project=${encodeURIComponent(st.project)}`, 'ushi-prompts'); return; }
     const b = e.target.closest('.mi[data-mode]'); if (!b || b.disabled) return;
     closeMenus();

@@ -34,6 +34,8 @@ DEFAULT_SETTINGS = {
     "api_provider": "gemini",         # api engine: gemini | openai | anthropic | openrouter | custom (llm_api.py)
     "api_model": "",                  # for the api engine; empty = provider default
     "api_base_url": "",               # empty = the provider's; required for custom
+    "api_layout": "model",            # api engine: model (writes the whole document) | app (writes the
+                                      # conversation; the app builds head, header and footer - for small models)
     "ai_setup_done": False,           # the first-run AI setup dialog was answered
     "auto_final_beautify": True,      # offer (ask) to build the final version when recording stops
     "engine": "whisper",              # ASR engine: whisper | gigaam | parakeet
@@ -119,6 +121,8 @@ def _check_setting(key: str, value):
             raise ValueError("Python: expected the path of a python executable")
     if key == "device" and value not in ("auto", "cpu", "cuda"):
         raise ValueError("device: auto, cpu or cuda")
+    if key == "api_layout" and value not in ("model", "app"):
+        raise ValueError("api_layout: model or app")
     return value
 
 

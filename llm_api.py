@@ -158,32 +158,45 @@ def _kwargs(cfg: dict) -> dict:
     return {"max_tokens": MAX_OUTPUT} if cfg["provider"] == "anthropic" else {}
 
 
-def stream(cfg: dict, messages: list[dict], on_delta=None, on_reasoning=None, info: dict | None = None) -> str:
+class Cancelled(Exception):
+    """stream() was stopped by its should_stop()."""
+
+
+def stream(cfg: dict, messages: list[dict], on_delta=None, on_reasoning=None, info: dict | None = None,
+           should_stop=None) -> str:
     """Run a chat completion, streaming; returns the whole reply. on_reasoning(text) gets the
     model's thinking, where the provider streams it (DeepSeek, OpenRouter, …). info, if given,
-    gets "finish_reason" ("length" = the reply was cut off at the output limit)."""
+    gets "finish_reason" ("length" = the reply was cut off at the output limit).
+    should_stop() is checked on every piece: when true, raises Cancelled. Whatever ends the
+    reply early (that, or an exception from a callback) closes the connection, so the server
+    stops generating too (a local model would otherwise keep the GPU busy to the end)."""
     why = problem(cfg)
     if why:
         raise RuntimeError(why)
     parts = []
     resp = client(cfg).chat.completions.create(model=cfg["model"], messages=messages, stream=True, **_kwargs(cfg))
     answered = False
-    for chunk in resp:
-        if not getattr(chunk, "choices", None):
-            continue
-        answered = True
-        if info is not None and getattr(chunk.choices[0], "finish_reason", None):
-            info["finish_reason"] = chunk.choices[0].finish_reason
-        delta = chunk.choices[0].delta
-        if on_reasoning:
-            r = getattr(delta, "reasoning_content", None) or getattr(delta, "reasoning", None)
-            if isinstance(r, str) and r:
-                on_reasoning(r)
-        d = delta.content or ""
-        if d:
-            parts.append(d)
-            if on_delta:
-                on_delta(d)
+    try:
+        for chunk in resp:
+            if should_stop and should_stop():
+                raise Cancelled("Cancelled")
+            if not getattr(chunk, "choices", None):
+                continue
+            answered = True
+            if info is not None and getattr(chunk.choices[0], "finish_reason", None):
+                info["finish_reason"] = chunk.choices[0].finish_reason
+            delta = chunk.choices[0].delta
+            if on_reasoning:
+                r = getattr(delta, "reasoning_content", None) or getattr(delta, "reasoning", None)
+                if isinstance(r, str) and r:
+                    on_reasoning(r)
+            d = delta.content or ""
+            if d:
+                parts.append(d)
+                if on_delta:
+                    on_delta(d)
+    finally:
+        resp.close()
     text = "".join(parts)
     if not answered:
         raise RuntimeError(NOT_OPENAI)
@@ -230,6 +243,9 @@ def explain(e: Exception) -> str:
         return f"Not found (wrong model name or host): {msg[:200]}"
     if name in ("APIConnectionError", "APITimeoutError"):
         return "Could not reach the API host (internet connection, or the base URL; is the local server running?)"
+    if "context length" in low or "context window" in low or "maximum context" in low:
+        return ("The request doesn't fit the model's context (as loaded on the server: LM Studio loads a model on "
+                "demand with its default context length; load it yourself with a larger Context Length)")
     if name == "RateLimitError" or " 429" in msg:
         return f"Rate limit or quota exceeded: {msg[:200]}"
     return f"{name}: {msg[:300]}"

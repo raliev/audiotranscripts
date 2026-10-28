@@ -66,8 +66,8 @@ class MediaInfo:
 
 def probe(path: Path) -> MediaInfo:
     """Duration and video stream, from `ffmpeg -i` (no ffprobe needed: imageio-ffmpeg has none)."""
-    r = subprocess.run([_ffmpeg(), "-hide_banner", "-i", str(path)], capture_output=True, text=True,
-                       encoding="utf-8", errors="replace")
+    r = subprocess.run([_ffmpeg(), "-hide_banner", "-i", str(path)], stdin=subprocess.DEVNULL, capture_output=True,
+                       text=True, encoding="utf-8", errors="replace")
     err = r.stderr
     m = re.search(r"Duration:\s*(\d+):(\d+):(\d+(?:\.\d+)?)", err)
     duration = int(m.group(1)) * 3600 + int(m.group(2)) * 60 + float(m.group(3)) if m else None
@@ -96,7 +96,7 @@ def grab_frame(path: Path, at: float, out: Path) -> Path:
     """One frame at *at* seconds, full resolution, lossless PNG."""
     r = subprocess.run([_ffmpeg(), "-y", "-loglevel", "error", "-ss", f"{max(0.0, at):.3f}", "-i", str(path),
                         "-frames:v", "1", "-an", str(out)],
-                       capture_output=True, text=True, encoding="utf-8", errors="replace")
+                       stdin=subprocess.DEVNULL, capture_output=True, text=True, encoding="utf-8", errors="replace")
     if r.returncode != 0 or not out.exists():
         raise RuntimeError(r.stderr.strip() or f"no frame at {at:.1f}s")
     return out
@@ -116,7 +116,7 @@ class FrameReader:
         self.proc = subprocess.Popen(
             [_ffmpeg(), "-loglevel", "error", "-nostdin", *range_args(start, end), "-i", str(path),
              "-an", "-sn", "-vf", f"fps=1/{interval:g}", "-q:v", "2", "-f", "image2pipe", "-vcodec", "mjpeg", "-"],
-            stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         self._err: list[str] = []
         threading.Thread(target=self._drain, daemon=True).start()
 

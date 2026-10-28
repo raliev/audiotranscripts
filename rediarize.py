@@ -189,8 +189,8 @@ def main():
         help="Number of speakers (e.g. 2) or 'auto' (default: auto)",
     )
     parser.add_argument(
-        "--cluster-threshold", type=float, default=0.6,
-        help="Cosine distance threshold for auto speaker detection (default: 0.6)",
+        "--cluster-threshold", type=float, default=0.7,
+        help="Cosine distance threshold for auto speaker detection (default: 0.7)",
     )
     parser.add_argument(
         "--sweep", action="store_true",

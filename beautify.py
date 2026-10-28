@@ -72,6 +72,7 @@ Create the {mode_title} of a FULL annotated transcript of a recorded session, as
    <figure class="shot"><img src="RELATIVE_SRC" alt="…" loading="lazy"><figcaption><span class="time">HH:MM:SS</span>what is shown and why it matters</figcaption></figure>
    Use the exact relative src listed for each screenshot above. (Auto frames, if any, are not yours to place: they are added automatically.)
 6. Header: title, subtitle, date and time range, "Who's speaking" chips, callout legend (only the callout types the document uses), hint. Footer: provenance (source transcript name, number of lines, time range, version {v}, generated {now}) plus notes on speaker attribution and corrected terms.
+   Write ALL the document's own text (title, subtitle, section titles, roles, callouts, legend, hint, footer) in the language of the speech, not in the language of the style reference.
 7. Self-contained HTML with inline CSS, light and dark mode as in the reference, and no external resources except the screenshot images. Write the content as static HTML, with no JavaScript rendering.
 8. Output file: {out}
 {write_rule}
@@ -466,6 +467,24 @@ def html_stats(html: str, shot_names: list[str]) -> dict:
     }
 
 
+# Placeholder text of the default style reference: a weak model fills the reference in
+# instead of writing up the transcript.
+TEMPLATE_LEFTOVERS = ("Firstname Lastname", "One-sentence takeaway", "Weekday, Month DD", "Session title - ",
+                      "[SPEAKER NAME]", "[WHAT WAS SAID]", "[ONE-SENTENCE TAKEAWAY]", "[SECTION TITLE]")
+NOT_FROM_TRANSCRIPT = "not made from the transcript"
+
+
+def copied_template(html: str, t_first: str = "", t_last: str = "") -> str:
+    """Why the document looks like the style reference filled in rather than the transcript; '' if it doesn't."""
+    left = [s.strip(" -") for s in TEMPLATE_LEFTOVERS if s in html]
+    if left:
+        return "it copies the style reference's placeholder text (" + ", ".join(f'"{s}"' for s in left) + ")"
+    times = TIME_RE.findall(html)
+    if times and t_first and t_first <= t_last and not any(t_first <= t <= t_last for t in times):
+        return f"none of its times ({min(times)}–{max(times)}) are in the transcript ({t_first}–{t_last})"
+    return ""
+
+
 def _slug(title: str) -> str:
     t = re.split(r"\s[-–-]\s|\(", title)[0] if title else ""
     s = re.sub(r"[^a-z0-9]+", "-", t.lower()).strip("-")
@@ -488,6 +507,9 @@ def finish(project: str, sid: str, v: int, status: str, **info) -> dict:
             html = out.read_text(encoding="utf-8", errors="replace")
             if "</html>" not in html[-3000:].lower() and "no end" not in rec.get("warning", ""):
                 rec["warning"] = "; ".join(x for x in (rec.get("warning"), "the document has no end (</html>): it was cut off") if x)
+            copied = copied_template(html, rec.get("t_first", ""), rec.get("t_last", ""))
+            if copied and NOT_FROM_TRANSCRIPT not in rec.get("warning", ""):
+                rec["warning"] = "; ".join(x for x in (rec.get("warning"), f"{NOT_FROM_TRANSCRIPT}: {copied}") if x)
             html, added = insert_frames(html, rec.get("frames", []), out.parent, rec.get("t_last", ""))
             if added or 'id="ushi-frames"' in html:
                 out.write_text(html, encoding="utf-8")
@@ -892,6 +914,12 @@ class RunLog:
 # the frame (head with CSS, header, footer), and the parts are joined into it. Any reply that
 # was cut off at the output limit is continued from where it stopped.
 
+LOOP_CHECK = 4000         # chars between checks that the model isn't going round in circles
+LOOP_TAIL = 400           # a reply whose last this-many chars already came twice before is a loop
+class Stuck(RuntimeError):
+    """The model keeps writing the same text over and over."""
+
+
 CHUNK_CHARS = 25000      # transcript chars per part (~25 min of speech); up to 1.3× that is one part
 MAX_CONTINUE = 4         # continuations of a reply that was cut off
 BODY_MARK = "<!--BODY-->"
@@ -899,7 +927,7 @@ CONTINUE_MSG = ("Your reply was cut off at the output limit. Continue EXACTLY wh
                 "needed: don't repeat anything, don't start over, no comments, no markdown fences.")
 
 API_CHUNK = """## This call: part {part} of {parts}
-The transcript is long, so the document is written part by part and the parts are joined afterwards. This part covers {t_from}–{t_to} (the RAW TRANSCRIPT below is only this part).
+The body is written part by part and the parts are joined afterwards. This part covers {t_from}–{t_to} (the RAW TRANSCRIPT below is only this part).
 - Write ONLY this part's body: numbered section dividers, speaker turns, callouts and screenshot figures, as HTML with the classes of the style reference. No <!DOCTYPE>, <html>, <head>, <style>, header or footer: those are made separately (requirement 6 doesn't apply to this call).
 - Number the sections from {next_section}.{prev_note}
 - Speakers identified so far (keep exactly these names; add new people as you identify them):
@@ -924,10 +952,36 @@ Sections:
 
 Reply with the HTML only, no markdown fences."""
 
+# The "app builds the frame" layout (setting api_layout = app): the model gets this instead of the
+# style reference, so there is no placeholder header to fill in, and these placeholders are easy to
+# spot (TEMPLATE_LEFTOVERS) when a model copies them.
+FIGURE_EXAMPLE = """<figure class="shot"><img src="[SRC]" alt="[WHAT IS SHOWN]" loading="lazy"><figcaption><span class="time">[HH:MM:SS]</span>[WHAT IS SHOWN AND WHY IT MATTERS]</figcaption></figure>
+
+"""
+BODY_MARKUP = """Replace every [BRACKETED] part with content from the RAW TRANSCRIPT, in the language of the speech. Speaker classes: us = the person recording ([Me]) and their team, them = the other party, other = an unidentified voice.
+Speaker names and roles are plain words, never the transcript's tags like [Me] or [Speaker 1]: the real name when it is said, otherwise a descriptive label.
+
+<div class="section">1 · [SECTION TITLE]</div>
+
+<div class="turn"><span class="who us">[SPEAKER NAME]</span><span class="org">[ROLE]</span><span class="time">[HH:MM:SS OF ITS FIRST LINE]</span>
+<p>[WHAT WAS SAID]</p></div>
+
+""" + FIGURE_EXAMPLE + """<aside class="callout summary"><div class="top"><span class="badge summary">📝 [THE WORD SUMMARY]</span><span class="lead">[ONE-SENTENCE TAKEAWAY]</span></div>
+<p>[KEY POINTS, DECISIONS, NUMBERS AND ACTION ITEMS, WITH <b>KEY TERMS</b> IN BOLD]</p></aside>
+
+<aside class="callout new"><div class="top"><span class="badge new">🆕 [THE WORD NEW]</span><span class="lead">[ONE-SENTENCE TAKEAWAY]</span></div>
+<p>[DETAIL]</p><p class="prior"><b>[THE WORDS PRIOR VIEW]:</b> [WHAT WE KNEW BEFORE, AND WHERE FROM]</p></aside>
+(✅ confirm and 🔄 update callouts: the same, with class "confirm" / "update".)"""
+
+API_TITLE = """Below are the section titles and takeaways of a transcript document. Write the document's title (at most 8 words, naming what the session was about) and a one-line subtitle, both in {language}.
+Reply with exactly two lines, the title and then the subtitle: no quotes, no labels, no markdown.
+
+{sections}"""
+
 TEMPLATES.update({
     "api_chunk": {
         "title": "API: one part", "default": API_CHUNK,
-        "help": "API engine, long transcripts: added to each part's request (the requirements of the main prompt come first).",
+        "help": "API engine: added to each part's request for a long transcript, and to every request when the app builds the frame (the requirements of the main prompt come first).",
         "placeholders": {"part": "part number", "parts": "number of parts", "t_from": "time the part starts",
                          "t_to": "time the part ends", "next_section": "number of the part's first section",
                          "prev_note": "how the previous part ended (empty for part 1)",
@@ -941,6 +995,12 @@ TEMPLATES.update({
                          "n_lines": "number of lines", "t_first": "first time", "t_last": "last time",
                          "v": "version", "now": "date and time", "date": "recording date line",
                          "speakers": "speakers with roles", "sections": "section titles"},
+    },
+    "api_title": {
+        "title": "API: title (app builds the frame)", "default": API_TITLE,
+        "help": "API engine, when the app builds the frame: the last, short call that names the document.",
+        "placeholders": {"sections": "section titles with their one-line takeaways",
+                         "language": "the language of the speech (\"Russian\", or \"the same language as the sections\")"},
     },
 })
 
@@ -1029,7 +1089,9 @@ def _body_of(fragment: str) -> str:
     if m:
         fragment = m.group(1)
     fragment = re.sub(r"<footer\b.*?</footer>", "", fragment, flags=re.S | re.I)
-    return re.sub(r"<header\b.*?</header>", "", fragment, flags=re.S | re.I).strip()
+    fragment = re.sub(r"<header\b.*?</header>", "", fragment, flags=re.S | re.I).strip()
+    m = re.fullmatch(r'<div class="wrap">(.*)</div>', fragment, re.S)
+    return m.group(1).strip() if m else fragment
 
 
 def _speakers(html: str) -> list[str]:
@@ -1039,6 +1101,113 @@ def _speakers(html: str) -> list[str]:
         if name and name not in seen:
             seen[name] = (m.group(2) or "").strip()
     return [f"{n} · {r}" if r else n for n, r in seen.items()]
+
+
+# The frame's own words, by the language of the speech (others get English).
+FRAME_WORDS = {
+    "en": {"who": "Who's speaking", "legend": "How to read the callouts",
+           "summary": "The gist of the topic above: key points, decisions, numbers, action items.",
+           "new": "Something we did not have in the source material before this session.",
+           "confirm": "Confirms / adds colour to something already documented.",
+           "update": "Changes, narrows, or contradicts what prior sources said - worth reconciling.",
+           "badge": {"summary": "📝 SUMMARY", "new": "🆕 NEW", "confirm": "✅ CONFIRMS", "update": "🔄 UPDATES"},
+           "footer": "Built from the transcript {source} ({n} lines, {t1}–{t2}) · version {v} · {now}",
+           "unknown": "Speaker",
+           "months": ["January", "February", "March", "April", "May", "June", "July", "August", "September",
+                      "October", "November", "December"], "date": "{month} {d}, {y}"},
+    "ru": {"who": "Кто говорит", "legend": "Как читать выноски",
+           "summary": "Суть темы выше: главное, решения, цифры, задачи.",
+           "new": "То, чего не было в прежних материалах.",
+           "confirm": "Подтверждает или дополняет уже известное.",
+           "update": "Меняет, уточняет или опровергает прежние источники - стоит свериться.",
+           "badge": {"summary": "📝 ИТОГ", "new": "🆕 НОВОЕ", "confirm": "✅ ПОДТВЕРЖДАЕТ", "update": "🔄 МЕНЯЕТ"},
+           "footer": "Собрано из транскрипта {source} ({n} строк, {t1}–{t2}) · версия {v} · {now}",
+           "unknown": "Собеседник",
+           "months": ["января", "февраля", "марта", "апреля", "мая", "июня", "июля", "августа", "сентября",
+                      "октября", "ноября", "декабря"], "date": "{d} {month} {y}"},
+}
+
+
+FIGURE_RE = re.compile(r'<figure class="shot"><img src="([^"]*)"[^>]*>\s*<figcaption>(.*?)(?:</figcaption>\s*</figure>|(?=\n\s*\n)|$)', re.S)
+
+
+def tidy_body(body: str, lang: str, srcs: set[str]) -> str:
+    """What a small model leaves in the body: tags as speaker names, example text, English badges,
+    speech put into a screenshot figure that doesn't exist."""
+    def name(m):
+        text = re.sub(r"\[([^\]<]*)\]", r"\1", m.group(2))
+        text = re.sub(r"\s*\((?:Me|Them|Other|Speaker \d+)\)\s*$", "", text).strip()
+        return m.group(1) + text + m.group(3)
+    body = re.sub(r'(<span class="(?:who\b[^"]*|org)">)([^<]*)(</span>)', name, body)
+
+    def figure(m):
+        if m.group(1) in srcs:
+            return m.group(0)
+        t = re.search(r'<span class="time">(\d{2}:\d{2}:\d{2})</span>', m.group(2))
+        text = re.sub(r"<[^>]+>", "", m.group(2)).strip()
+        text = text.removeprefix(t.group(1)).strip() if t else text
+        text = re.sub(r'"?\s*what is shown and why it matters\s*$', "", text, flags=re.I)   # requirement 5's example
+        return (f'<div class="turn"><span class="who other">{FRAME_WORDS[lang]["unknown"]}</span><span class="org"></span>'
+                f'<span class="time">{t.group(1) if t else ""}</span>\n<p>{text}</p></div>')
+    body = FIGURE_RE.sub(figure, body)
+
+    seen = set()
+    def once(m):      # the same turn again, e.g. a later section that starts over
+        key = (re.findall(r'<span class="time">([^<]*)</span>', m.group(0))[:1],
+               re.sub(r"\s+", " ", re.sub(r"<[^>]+>", " ", m.group(0).split("</span>")[-1])).strip())
+        key = (tuple(key[0]), key[1])
+        if key in seen:
+            return ""
+        seen.add(key)
+        return m.group(0)
+    body = re.sub(r'<div class="turn">.*?</p>\s*</div>\s*', once, body, flags=re.S)
+    body = re.sub(r"<p>\s*Key points, decisions[^<]*(?:<b>key terms</b>[^<]*)?</p>\s*", "", body)
+    for k, text in FRAME_WORDS[lang]["badge"].items():
+        body = re.sub(rf'(<span class="badge {k}\b[^"]*">)\s*{re.escape(FRAME_WORDS["en"]["badge"][k])}\s*(</span>)',
+                      lambda m: m.group(1) + text + m.group(2), body)
+    return body
+
+
+def speech_lang(text: str) -> str:
+    letters = re.findall(r"[^\W\d_]", text)
+    cyr = sum("Ѐ" <= c <= "ӿ" for c in letters)
+    return "ru" if letters and cyr / len(letters) > 0.3 else "en"
+
+
+def app_frame(body: str, style_html: str, lang: str, title: str, sub: str, dt: datetime | None,
+              t_first: str, t_last: str, source: str, n_lines: int, v: int) -> str:
+    """The whole document around a body the model wrote: CSS of the style reference, header, footer."""
+    w = FRAME_WORDS[lang]
+    css = "\n".join(re.findall(r"<style\b[^>]*>.*?</style>", style_html, re.S | re.I))
+    when = " · ".join(x for x in (
+        fill(w["date"], d=dt.day, month=w["months"][dt.month - 1], y=dt.year) if dt else "",
+        f"{t_first}–{t_last}" if t_first and t_first != "-" else "") if x)
+    chips, seen = [], set()
+    for m in re.finditer(r'<span class="who (us|them|other)\b[^"]*">([^<]+)</span>(?:\s*<span class="org">([^<]*)</span>)?', body):
+        side, name, role = m.group(1), m.group(2).strip(), (m.group(3) or "").strip()
+        if name not in seen:
+            seen.add(name)
+            chips.append(f'<span class="chip {side}">{name}{f" - {role}" if role and role != name else ""}</span>')
+    kinds = [k for k in ("summary", "new", "confirm", "update") if re.search(rf'class="callout {k}\b', body)]
+    legend = ""
+    if [k for k in kinds if k != "summary"]:     # a SUMMARY alone needs no explaining
+        def badge(k):
+            m = re.search(rf'<span class="badge {k}\b[^"]*">([^<]+)</span>', body)
+            return m.group(1).strip() if m else w["badge"][k]
+        legend = (f'  <div class="legend">\n    <h3>{w["legend"]}</h3>\n'
+                  + "".join(f'    <div class="item"><span class="badge {k}">{badge(k)}</span><span>{w[k]}</span></div>\n'
+                            for k in kinds) + "  </div>\n")
+    who = (f'  <div class="attendees">\n    <h3>{w["who"]}</h3>\n    <div class="att-row">\n'
+           + "".join(f"      {c}\n" for c in chips) + "    </div>\n  </div>\n") if chips else ""
+    footer = fill(w["footer"], source=f"<code>{_esc(source)}</code>", n=n_lines, t1=t_first, t2=t_last, v=v,
+                  now=datetime.now().strftime("%Y-%m-%d %H:%M"))
+    return (f'<!doctype html>\n<html lang="{lang}">\n<head>\n<meta charset="utf-8">\n'
+            '<meta name="viewport" content="width=device-width, initial-scale=1">\n'
+            f"<title>{_esc(title)}</title>\n{css}\n</head>\n<body>\n<div class=\"wrap\">\n\n"
+            f'<header class="doc">\n  <h1>{_esc(title)}</h1>\n'
+            + (f'  <p class="sub">{_esc(sub)}</p>\n' if sub else "")
+            + (f'  <p class="meta">{when}</p>\n' if when else "")
+            + who + legend + "</header>\n\n" + body + f"\n\n<footer>\n  {footer}\n</footer>\n\n</div>\n</body>\n</html>\n")
 
 
 def run_api(spec: dict, on_progress=None, log: RunLog | None = None) -> dict:
@@ -1065,9 +1234,18 @@ def run_api(spec: dict, on_progress=None, log: RunLog | None = None) -> dict:
     note = [""]
     thought = [0, 0]
     warnings: list[str] = []
+    reply: list[str] = []       # the current reply, for the loop check
+    cancel = spec.get("cancel")  # threading.Event from the server's Cancel
 
     def delta(d):
         total[0] += len(d)
+        reply.append(d)
+        n = sum(map(len, reply))
+        if n // LOOP_CHECK != (n - len(d)) // LOOP_CHECK:
+            so_far = "".join(reply)
+            if so_far.count(so_far[-LOOP_TAIL:]) >= 3:
+                raise Stuck(f"The model got stuck repeating itself ({n:,} characters into the reply); "
+                            "try again, or another model")
         if on_progress:
             on_progress(total[0], note[0])
 
@@ -1090,8 +1268,18 @@ def run_api(spec: dict, on_progress=None, log: RunLog | None = None) -> dict:
             info: dict = {}
             thought[0] = thought[1] = 0
             started, before = time.time(), total[0]
+            reply.clear()
             try:
-                part = llm_api.stream(cfg, messages, delta, reasoning, info=info)
+                part = llm_api.stream(cfg, messages, delta, reasoning, info=info,
+                                      should_stop=cancel.is_set if cancel else None)
+            except llm_api.Cancelled:
+                if log:
+                    log.write(f"{label}: cancelled after {total[0] - before:,} chars")
+                raise
+            except Stuck as e:
+                if log:
+                    log.write(f"{label}: {e}")
+                raise
             except Exception as e:
                 if log:
                     log.write(f"{label}: failed: {llm_api.explain(e)}")
@@ -1113,6 +1301,23 @@ def run_api(spec: dict, on_progress=None, log: RunLog | None = None) -> dict:
         if log:
             log.write(f"{label}: still cut off after {MAX_CONTINUE} continuations, kept as is")
         return acc
+
+    def checked(prompt: str, label: str, must_end: str | None = None, t_from: str = "", t_to: str = "") -> str:
+        """call(), asked once more when the model filled in the style reference instead of the transcript."""
+        out = call(prompt, label, must_end)
+        why = copied_template(out, t_from, t_to)
+        if not why:
+            return out
+        if log:
+            log.write(f"{label}: {NOT_FROM_TRANSCRIPT} ({why}), asking again")
+        out = call(prompt + f"\n\n## YOUR PREVIOUS ATTEMPT WAS WRONG\nIn it {why}: it filled in the style "
+                   "reference instead of writing up the RAW TRANSCRIPT. The style reference's text is placeholder "
+                   "only. Every speaker, time and sentence must come from the RAW TRANSCRIPT, in its language.",
+                   f"{label} (again)", must_end)
+        why = copied_template(out, t_from, t_to)
+        if why:
+            warnings.append(f"{NOT_FROM_TRANSCRIPT}: {why}; try a stronger model")
+        return out
 
     def inputs(part_text: str, t_from: str, t_to: str, frac: tuple[float, float], whole: bool) -> str:
         shots = [x for x in spec["shots"] if whole or t_from <= x["time"] <= t_to]
@@ -1140,17 +1345,51 @@ def run_api(spec: dict, on_progress=None, log: RunLog | None = None) -> dict:
                 + f"## RAW TRANSCRIPT\n{part_text}\n"
                 + (f"\n## EXTERNAL TRANSCRIPTS (how to use each is in its heading; keep OUR times)\n{ext}" if ext else ""))
 
+    def title_of(body: str) -> tuple[str, str]:
+        """(title, subtitle) from a short call; the first section's title if that fails."""
+        plain = lambda x: re.sub(r"\s+", " ", re.sub(r"<[^>]+>", "", x)).strip()
+        sections = [plain(x) for x in re.findall(r'<div class="section[^"]*">(.*?)</div>', body, re.S)]
+        leads = [plain(x) for x in re.findall(r'<span class="lead">(.*?)</span>', body, re.S)]
+        fallback = (re.sub(r"^\d+\s*·\s*", "", sections[0]) if sections else spec["input"].stem, "")
+        lines = "\n".join(f"  {x}" for x in sections[:40]) + "\n" + "\n".join(f"  - {x}" for x in leads[:40])
+        try:
+            reply = call(fill(P["api_title"], sections=lines.strip("\n") or "(none)",
+                              language="Russian" if lang == "ru" else "the same language as the sections"), "Title")
+        except llm_api.Cancelled:
+            raise
+        except Exception:
+            return fallback      # call() has logged why
+        got = [x.strip().strip('"«»*#').strip() for x in _strip_fences(reply).splitlines() if x.strip()]
+        if not got or len(got[0]) > 150 or "<" in got[0]:
+            if log:
+                log.write("Title: no usable title in the reply, the first section's is used")
+            return fallback
+        return got[0], (got[1] if len(got) > 1 and len(got[1]) <= 300 and "<" not in got[1] else "")
+
     parts = split_transcript(text)
+    by_app = settings.get("api_layout") == "app"     # the model writes only the body
+    timed = re.findall(r"(?m)^\[(\d{2}:\d{2}:\d{2})\]", text)
+    lang = speech_lang(text)
     head = "Create a FULL annotated transcript as one self-contained HTML document.\n" + date_line
-    if len(parts) == 1:
+    if lang == "ru":    # small models write the titles and callouts in English otherwise
+        head += ("The speech is in Russian: write ALL the document's text in Russian (section titles, roles, "
+                 "callouts), not in English.\n")
+    if len(parts) == 1 and not by_app:
         if log:
             log.write(f"Transcript {len(text):,} chars: one request")
         prompt = (head + "\n## Requirements" + req + "\nReply with the HTML document only, with no markdown fences.\n\n"
                   f"## STYLE REFERENCE (structure/CSS only)\n{style}\n\n" + inputs(text, "", "", (0, 1), True))
-        html = call(prompt, "Document", must_end="</html>")
+        html = checked(prompt, "Document", "</html>", *((timed[0], timed[-1]) if timed else ()))
     else:
         if log:
-            log.write(f"Transcript {len(text):,} chars: {len(parts)} parts of ~{CHUNK_CHARS:,} chars")
+            log.write(f"Transcript {len(text):,} chars: "
+                      + (f"{len(parts)} parts of ~{CHUNK_CHARS:,} chars" if len(parts) > 1 else "one request")
+                      + (" · the model writes the conversation, the app builds the frame" if by_app else ""))
+        markup = (f"## STYLE REFERENCE (the body's markup)\n{BODY_MARKUP}" if by_app
+                  else f"## STYLE REFERENCE (structure, classes and markup only)\n{style}")
+        if by_app and not spec["shots"]:
+            markup = (markup.replace(FIGURE_EXAMPLE, "")
+                      + "\n\nThere are no screenshots in this session: write no <figure> at all, every line is a turn.")
         bodies: list[str] = []
         offset = 0
         for k, part_text in enumerate(parts, 1):
@@ -1165,14 +1404,18 @@ def run_api(spec: dict, on_progress=None, log: RunLog | None = None) -> dict:
             task = fill(P["api_chunk"], part=k, parts=len(parts), t_from=t_from, t_to=t_to,
                         next_section=next_section, prev_note=prev,
                         speakers="\n".join(f"  {x}" for x in speakers) or "  (none yet)")
-            prompt = (head + "\n## Requirements" + req + "\n" + task + "\n\n"
-                      f"## STYLE REFERENCE (structure, classes and markup only)\n{style}\n\n"
-                      + inputs(part_text, t_from, t_to, frac, False))
-            bodies.append(_body_of(_strip_fences(call(prompt, f"Part {k}/{len(parts)} ({t_from}–{t_to})"))))
+            prompt = (head + "\n## Requirements" + req + "\n" + task + "\n\n" + markup + "\n\n"
+                      + inputs(part_text, t_from, t_to, frac, len(parts) == 1))
+            label = f"Part {k}/{len(parts)} ({t_from}–{t_to})" if len(parts) > 1 else "Conversation"
+            bodies.append(_body_of(_strip_fences(checked(prompt, label, t_from=t_from, t_to=t_to))))
         body = "\n".join(bodies)
+    if by_app:
+        body = tidy_body(body, lang, {x["src"] for x in spec["shots"]})
+        html = app_frame(body, style, lang, *title_of(body), dt, timed[0] if timed else "",
+                         timed[-1] if timed else "", spec["input"].name, len(timed), spec["v"])
+    elif len(parts) > 1:
         callouts = sorted(set(re.findall(r'class="callout (\w+)', body)))
         sections = re.findall(r'<div class="section[^"]*">(.*?)</div>', body, re.S)
-        timed = re.findall(r"(?m)^\[(\d{2}:\d{2}:\d{2})\]", text)
         shell_prompt = fill(
             P["api_shell"], body_mark=BODY_MARK, callout_types=", ".join(callouts) or "none",
             source=spec["input"].name, n_lines=len(timed), t_first=timed[0] if timed else "",
@@ -1182,7 +1425,7 @@ def run_api(spec: dict, on_progress=None, log: RunLog | None = None) -> dict:
         if notes:
             shell_prompt += f"\n\n## THE USER'S NOTES (names and terms)\n{notes}"
         shell_prompt += f"\n\n## STYLE REFERENCE\n{style}"
-        shell = _strip_fences(call(shell_prompt, "Header & footer", must_end="</html>"))
+        shell = _strip_fences(checked(shell_prompt, "Header & footer", "</html>"))
         if BODY_MARK in shell:
             html = shell.replace(BODY_MARK, "\n" + body + "\n", 1)
         else:
@@ -1211,6 +1454,8 @@ def main():
     ap.add_argument("sid", help="Session id, e.g. 20260928_110051 (or 'latest')")
     ap.add_argument("--mode", choices=["update", "full", "final"], default="full")
     ap.add_argument("--model", default=None, help="Claude model alias (default from settings: opus)")
+    ap.add_argument("--layout", choices=["model", "app"], default=None,
+                    help="API engine: who builds the frame (default from settings)")
     ap.add_argument("--embed", type=int, metavar="N",
                     help="Don't beautify: save vN.html as vN-emb.html with the images embedded, to share as one file")
     args = ap.parse_args()
@@ -1226,6 +1471,8 @@ def main():
     spec = prepare(args.project, sid, args.mode)
     if args.model:
         spec["settings"]["beautify_model"] = args.model
+    if args.layout:
+        spec["settings"]["api_layout"] = args.layout
     print(f"Beautify v{spec['v']} ({spec['mode']}) → {spec['out']}")
     started = time.time()
 

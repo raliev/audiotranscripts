@@ -22,12 +22,13 @@ import easyocr
 from asr_engines import ENGINES, create_engine, engine_label
 import downloads
 import media_file
+import echo_gate
 import native_helpers
 from events import events
 
 try:
     from speaker_id import (
-        SpeakerEmbedder, WordToken, AsrSegment, EmbeddingWindow,
+        SpeakerEmbedder, WordToken, AsrSegment, EmbeddingWindow, LiveSpeakers,
         cluster_and_label, diarize_words,
     )
     _DIARIZATION_AVAILABLE = True
@@ -74,6 +75,9 @@ live_frames = None   # autoframes.LiveFrames once auto frames are switched on (-
 channel_rms: dict[str, float] = {}    # last level per channel; the meter shows the loudest
 file_pos = 0.0          # file source: seconds of the range fed to the VAD so far
 vad_pos = 0.0           # file source: seconds of the range the VAD has gone through
+session_t0 = 0.0                      # time.monotonic() at session_data["start_time"]
+channel_start: dict[str, float] = {}  # "mic" / "app": session time of the channel's first sample
+app_loudness: echo_gate.AppLoudness | None = None   # app+mic mode: to drop the app's echo in the mic
 
 
 def load_models(engine_name="whisper", asr_model=None):
@@ -138,6 +142,7 @@ def audio_callback(indata, frames, time_info, status):
     if status:
         print(f"[audio] {status}", file=sys.stderr)
     data = indata[:, 0].copy()
+    mark_channel_start("mic", data)
     if mic_muted.is_set():
         # Feed silence (not nothing) so timestamps stay aligned with the wall clock
         # and a phrase in progress ends normally.
@@ -146,6 +151,13 @@ def audio_callback(indata, frames, time_info, status):
     emit_level("mic", data)
     if save_audio_flag:
         audio_chunks.append(data)
+
+
+def mark_channel_start(channel: str, data: np.ndarray):
+    """Remember when a live channel's first sample was heard: the models load and the helpers
+    start after start_time, so a channel's sample count alone runs behind the wall clock."""
+    if channel not in channel_start:
+        channel_start[channel] = time.monotonic() - session_t0 - len(data) / SAMPLE_RATE
 
 
 def emit_level(channel: str, data: np.ndarray):
@@ -163,8 +175,11 @@ def app_audio_reader(proc, target_queue, chunks):
         if not raw or len(raw) < 4:
             break
         data = np.frombuffer(raw[: len(raw) // 4 * 4], dtype=np.float32).copy()
+        mark_channel_start("app", data)
         if mic_muted.is_set():
             data = np.zeros_like(data)
+        if app_loudness is not None:
+            app_loudness.add(data, channel_start["app"])
         target_queue.put(data)
         emit_level("app", data)
         if save_audio_flag:
@@ -438,8 +453,10 @@ LANG_RECHECK_INTERVAL = 200 # words between periodic re-checks
 LANG_WINDOW = 300           # sliding window size for re-checks
 
 
-def transcription_worker(asr_engine, output_file, session_data, enable_diarization, lang_mode):
-    """Daemon thread: transcribe speech segments and stream results to console."""
+def transcription_worker(asr_engine, output_file, session_data, enable_diarization, lang_mode,
+                         live_speakers=None):
+    """Daemon thread: transcribe speech segments and stream results to console.
+    live_speakers (diarization on): numbers each line's speaker right away."""
     # Language state
     if lang_mode == "auto":
         current_lang = None  # Whisper auto-detects per segment
@@ -482,12 +499,30 @@ def transcription_worker(asr_engine, output_file, session_data, enable_diarizati
                 # Wall-clock timestamp derived from sample-accurate time
                 return (session_data["start_time"] + timedelta(seconds=seg_t_start + t_rel)).strftime("%H:%M:%S")
 
+            def line_speaker():
+                """The line's speaker number while recording (diarization on), else the channel label."""
+                if live_speakers is None or not diarize_this:
+                    return label
+                # Only the words' span: the segment ends with the pause, and silence blurs the voice
+                # (and would make a one-word phrase look long enough to start a new speaker)
+                words = [w for w in asr_words if w.t_start >= seg_t_start + line_t - 0.01]
+                s, e = ((words[0].t_start - seg_t_start, words[-1].t_end - seg_t_start) if words else
+                        (line_t, seg_t_end - (SILENCE_DURATION_MS / 1000 if seg_t_end == duration else 0)))
+                s, e = int(max(0.0, s) * SAMPLE_RATE), int(e * SAMPLE_RATE)
+                audio = (segment_audio[s:e] if e - s >= SAMPLE_RATE // 2
+                         else segment_audio[int(line_t * SAMPLE_RATE):int(seg_t_end * SAMPLE_RATE)])
+                try:
+                    return live_speakers.label(audio, max(0, e - s) / SAMPLE_RATE) or label
+                except Exception as ex:
+                    print(f"\r\033[K[speakers] live label failed: {ex}", file=sys.stderr)
+                    return label
+
             def end_line():
                 output_file.write("\n")
                 output_file.flush()
                 events.emit("segment", time=stamp(line_t), text=" ".join(line_texts),
                             t=round(seg_t_start + line_t, 2), duration=round(seg_t_end - line_t, 1),
-                            speaker=label)
+                            speaker=line_speaker())
                 if enable_diarization and not diarize_this:
                     session_data["fixed"].append((seg_t_start + line_t, label, " ".join(line_texts)))
 
@@ -634,9 +669,10 @@ def embed_worker(embedder, session_data):
         sys.stdout.flush()
 
 
-def vad_loop(vad_model, source=audio_queue, label=None):
+def vad_loop(vad_model, source=audio_queue, label=None, channel=None):
     """VAD loop over one channel: detect speech segments and enqueue them for transcription.
     label marks the channel's lines in app+mic mode ("Me" / "Them"); None otherwise.
+    channel ("mic" / "app") places its phrases on the session clock; None for an audio file.
     Runs until stop_event, or until the source yields None (end of an audio file)."""
     global vad_pos
     vad_chunk_samples = 512  # 32ms at 16kHz
@@ -706,11 +742,18 @@ def vad_loop(vad_model, source=audio_queue, label=None):
                 sys.stdout.flush()
                 # End of speech segment
                 queued = speech_count >= min_speech_chunks
-                t_start = speech_start_sample / SAMPLE_RATE
+                t_start = channel_start.get(channel, 0.0) + speech_start_sample / SAMPLE_RATE
+                echo = False
+                if queued and label == "Me" and app_loudness is not None:
+                    echo, corr = app_loudness.is_echo(speech_buffer, t_start)
+                    if echo:
+                        queued = False
+                        print(f"\r\033[K[echo] dropped {len(speech_buffer) / SAMPLE_RATE:.1f}s mic phrase: "
+                              f"the other side through the speakers (r={corr:.2f})")
                 if queued:
                     transcribe_queue.put((t_start, speech_buffer.copy(), label))
                 events.emit("speech_end", queued=queued, t=round(t_start, 2),
-                            duration=round(len(speech_buffer) / SAMPLE_RATE, 1), cut=cut)
+                            duration=round(len(speech_buffer) / SAMPLE_RATE, 1), cut=cut, echo=echo)
                 speech_buffer = np.array([], dtype=np.float32)
                 is_speaking = False
                 silent_count = 0
@@ -720,7 +763,7 @@ def vad_loop(vad_model, source=audio_queue, label=None):
     if len(speech_buffer) > 0 and speech_count >= min_speech_chunks:
         sys.stdout.write("\r\033[K")
         sys.stdout.flush()
-        t_start = speech_start_sample / SAMPLE_RATE
+        t_start = channel_start.get(channel, 0.0) + speech_start_sample / SAMPLE_RATE
         transcribe_queue.put((t_start, speech_buffer.copy(), label))
         events.emit("speech_end", queued=True, t=round(t_start, 2),
                     duration=round(len(speech_buffer) / SAMPLE_RATE, 1))
@@ -973,8 +1016,10 @@ def save_audio_recording(project_dir: Path, timestamp: str):
         return
 
     audio = np.concatenate(audio_chunks) if audio_chunks else np.zeros(0, dtype=np.float32)
-    if app_chunks:      # app+mic mode: mix the two channels
+    if app_chunks:      # app+mic mode: mix the two channels, lined up on the session clock
         app = np.concatenate(app_chunks)
+        shift = int((channel_start.get("app", 0.0) - channel_start.get("mic", 0.0)) * SAMPLE_RATE)
+        app, audio = (np.pad(app, (shift, 0)), audio) if shift >= 0 else (app, np.pad(audio, (-shift, 0)))
         n = max(len(audio), len(app))
         audio = np.pad(audio, (0, n - len(audio))) + np.pad(app, (0, n - len(app)))
         audio = np.clip(audio, -1.0, 1.0)
@@ -997,7 +1042,7 @@ def save_audio_recording(project_dir: Path, timestamp: str):
         result = subprocess.run(
             [native_helpers.ffmpeg_exe() or "ffmpeg", "-y", "-loglevel", "error",
              "-i", str(wav_path), "-b:a", "64k", str(mp3_path)],
-            capture_output=True, text=True, encoding="utf-8", errors="replace",
+            stdin=subprocess.DEVNULL, capture_output=True, text=True, encoding="utf-8", errors="replace",
         )
         if result.returncode == 0:
             wav_path.unlink()
@@ -1045,8 +1090,8 @@ def main():
         help="Enable diarization: number of speakers (e.g. 2) or 'auto'",
     )
     parser.add_argument(
-        "--cluster-threshold", type=float, default=0.6,
-        help="Cosine distance threshold for auto speaker detection (default: 0.6)",
+        "--cluster-threshold", type=float, default=0.7,
+        help="Cosine distance threshold for auto speaker detection (default: 0.7)",
     )
     # Used by the web UI (server.py); console mode doesn't need them.
     parser.add_argument("--events", default=None,
@@ -1101,6 +1146,9 @@ def main():
                                 "the video frame on screen) instead of as fast as the recognizer goes")
     file_opts.add_argument("--play", action="store_true",
                            help="With --realtime: play the range in an ffplay window alongside")
+    parser.add_argument("--no-echo-filter", action="store_true",
+                        help="app+mic: keep mic phrases that only repeat the app's audio heard through the "
+                             "speakers (by default they are dropped, so the other side isn't marked [Me])")
     args = parser.parse_args()
     source_kind, _, source_arg = args.source.partition(":")
     if source_kind not in ("mic", "app", "app+mic", "file") or (source_kind != "mic" and not source_arg):
@@ -1244,6 +1292,8 @@ def main():
         output_file = open(output_path, "w", encoding="utf-8")
 
     # Shared session state
+    global session_t0
+    session_t0 = time.monotonic()
     session_data = {
         # A file's timestamps are positions in the file (00:00:00 = its start, also with --start).
         "start_time": datetime.combine(datetime.now().date(), datetime.min.time()) + timedelta(seconds=range_start)
@@ -1282,7 +1332,8 @@ def main():
         events.emit("lang", lang="ru")
     worker = threading.Thread(
         target=transcription_worker,
-        args=(asr_engine, output_file, session_data, enable_diarization, lang_mode),
+        args=(asr_engine, output_file, session_data, enable_diarization, lang_mode,
+              LiveSpeakers(embedder, args.cluster_threshold, num_speakers) if enable_diarization else None),
         daemon=True,
     )
     worker.start()
@@ -1330,14 +1381,20 @@ def main():
         )
         stream.start()
     if source_kind in ("app", "app+mic"):
-        app_proc = subprocess.Popen([*audio_helper, "--capture", source_arg],
+        # stdin=DEVNULL: our stdin is the control pipe. On Windows a child inheriting it hangs on
+        # startup (Python checks its stdin) while control_reader waits on it, until the next command.
+        app_proc = subprocess.Popen([*audio_helper, "--capture", source_arg], stdin=subprocess.DEVNULL,
                                     stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         threading.Thread(target=helper_log_reader, args=(app_proc, "[app audio]"), daemon=True).start()
         threading.Thread(target=app_audio_reader,
                          args=(app_proc, app_queue if dual else audio_queue, app_chunks if dual else audio_chunks),
                          daemon=True).start()
         if dual:
-            app_vad_thread = threading.Thread(target=vad_loop, args=(load_vad(), app_queue, "Them"), daemon=True)
+            global app_loudness
+            if not args.no_echo_filter:
+                app_loudness = echo_gate.AppLoudness()
+            app_vad_thread = threading.Thread(target=vad_loop, args=(load_vad(), app_queue, "Them", "app"),
+                                              daemon=True)
             app_vad_thread.start()
     if file_audio is not None:
         threading.Thread(target=file_feeder, args=(file_audio, args.realtime, range_start), daemon=True).start()
@@ -1511,7 +1568,7 @@ def main():
     events.emit("status", state="listening", engine=args.engine, source=args.source)
 
     try:
-        vad_loop(vad_model, audio_queue, main_label)
+        vad_loop(vad_model, audio_queue, main_label, {"file": None, "app": "app"}.get(source_kind, "mic"))
     finally:
         stop_event.set()        # the audio file ended, or a stop was requested
         if screenshot_proc is not None:
