@@ -6,6 +6,8 @@ Local, real-time speech-to-text with screen capture. Narrate what you're doing o
 
 > 📝 **Article about this project:** [hybrismart.com](https://hybrismart.com/2026/10/25/voice-screen-local-models-en/) (also in [Russian](https://hybrismart.com/2026/10/25/voice-screen-local-models/) and [Ukrainian](https://hybrismart.com/2026/10/25/voice-screen-local-models-ua/)) · 🎬 [Demo video](https://www.youtube.com/watch?v=Jt3NA4wziVs)
 
+![ushi web UI: a TED talk recorded with auto frames -- the Beautified transcript with speakers, sections and slides inline; on the right, the auto frames with their classes](assets/web-ui.png)
+
 ## Download
 
 The easiest way is the app: the web UI in its own window, with Python and all dependencies, the helpers and ffmpeg inside -- nothing to install.
