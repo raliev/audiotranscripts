@@ -2,22 +2,56 @@
 
 # ushi 
 
-> 📝 **Article about this project:** [hybrismart.com](https://hybrismart.com/2026/10/25/voice-screen-local-models-en/) (also in [Russian](https://hybrismart.com/2026/10/25/voice-screen-local-models/) and [Ukrainian](https://hybrismart.com/2026/10/25/voice-screen-local-models-ua/))
+Local, real-time speech-to-text with screen capture. Narrate what you're doing on screen, record a call or play a YouTube talk -- ushi transcribes it with local models, keeps screenshots (on a hotkey or automatically) next to the words they belong to, and turns the result into a readable document with an LLM.
 
-Local, real-time speech-to-text with screenshot capture. Records voice commentary alongside screen captures, then uses an LLM to clean up the transcript using OCR'd screenshot text as reference context.
+> 📝 **Article about this project:** [hybrismart.com](https://hybrismart.com/2026/10/25/voice-screen-local-models-en/) (also in [Russian](https://hybrismart.com/2026/10/25/voice-screen-local-models/) and [Ukrainian](https://hybrismart.com/2026/10/25/voice-screen-local-models-ua/)) · 🎬 [Demo video](https://www.youtube.com/watch?v=Jt3NA4wziVs)
 
-Built for narrating what's on screen -- record a coding session, walkthrough, or meeting, take screenshots at key moments, and get a polished document at the end.
+## Download
+
+The easiest way is the app: the web UI in its own window, with Python and all dependencies, the helpers and ffmpeg inside -- nothing to install.
+
+**[⬇ Latest release](https://github.com/raliev/ushi/releases/latest)**
+
+| Platform | File | Requires |
+|---|---|---|
+| macOS, Apple Silicon | `ushi-<version>-arm64-none-models.dmg` | macOS 14+ |
+| macOS, Intel | `ushi-<version>-x64-none-models.dmg` | macOS 14+ |
+| Windows | `ushi-Setup-<version>-x64.exe` | Windows 10/11 |
+
+- **Models** are not inside: each one is downloaded on first use, with progress on screen; after that everything works offline.
+- **AI for Beautify and chat**: on first launch the app asks what to use -- [Claude Code](https://claude.com/claude-code) or an LLM API (Gemini, OpenAI, Anthropic, OpenRouter or any OpenAI-compatible server (DeepSeek, ...), including local Ollama and LM Studio). Recognition is always local.
+- **The builds aren't signed.** macOS: open the app the first time via right-click → **Open** (macOS 15+: System Settings → Privacy & Security → **Open Anyway**), or run `xattr -cr /Applications/ushi.app`. Windows: SmartScreen says "Windows protected your PC" -- **More info** → **Run anyway**.
+- **Permissions** (macOS): Microphone, Screen Recording (screenshots), Accessibility (selected text capture) and, for an app's audio, System Audio Recording. **Help** in the app has shortcuts to these settings.
+
+To run from source instead, see [Setup](#setup); to build the app yourself, [macOS app](#macos-app) and [Windows](#windows).
 
 ## Features
 
-- Real-time transcription, fully local (no cloud API), with a choice of engines: [faster-whisper](https://github.com/SYSTRAN/faster-whisper) (default), [GigaAM v3](https://github.com/salute-developers/GigaAM) or [Parakeet TDT v3](https://huggingface.co/nvidia/parakeet-tdt-0.6b-v3) via [onnx-asr](https://github.com/istupakov/onnx-asr) -- see [ASR engines](#asr-engines)
-- Voice Activity Detection via [Silero VAD](https://github.com/snakers4/silero-vad) -- only transcribes when you speak
-- Automatic language detection (Russian/English) with periodic re-evaluation
-- Global hotkeys for screenshots (`Ctrl+Shift+S`) and text selection capture (`Ctrl+Shift+W`)
-- OCR on screenshots via [EasyOCR](https://github.com/JaidedAI/EasyOCR) (Russian + English)
-- Optional speaker diarization using [SpeechBrain](https://github.com/speechbrain/speechbrain) ECAPA-TDNN embeddings
-- Post-processing: send raw transcript + OCR text to an LLM for cleanup and HTML generation
-- Audio recording export (MP3 via ffmpeg)
+**Recognition -- local only.** Audio and screenshots never leave the machine.
+- Three engines, all on CPU with int8: [faster-whisper](https://github.com/SYSTRAN/faster-whisper) `large-v3-turbo` (default, any language, takes term hints), [GigaAM v3](https://github.com/salute-developers/GigaAM) (Russian, ~20× faster than Whisper) and [Parakeet TDT v3](https://huggingface.co/nvidia/parakeet-tdt-0.6b-v3) (mixed Russian/English) -- see [ASR engines](#asr-engines). Whisper uses an NVIDIA GPU when there is one.
+- [Silero VAD](https://github.com/snakers4/silero-vad): only speech is recognized; Russian/English auto-detection; `[HH:MM:SS]` timestamps taken from the audio, so they stay right even when recognition lags behind.
+- Term hints from the project notes (`--vocab-file`) and "heard → meant" corrections.
+- Optional speaker diarization ([SpeechBrain](https://github.com/speechbrain/speechbrain) ECAPA-TDNN), re-computable later without re-recording.
+
+**Sources.**
+- Microphone (it also hears the speakers -- YouTube, a call on speakers).
+- One app's audio, e.g. Teams, Zoom, Meet in a browser -- alone or **app + mic** as `[Them]` / `[Me]` lines (Core Audio process taps on macOS 14.2+, WASAPI process loopback on Windows). Works with headphones.
+- Audio and video files: real-time with a player, or in the background as fast as recognition goes; a start/end range; frames taken straight from the video.
+- **Batch**: a queue of YouTube links → download (yt-dlp, subtitles as a second source) → transcribe → Beautify, each in its own project.
+
+**Screen.**
+- Global hotkeys: `Ctrl+Shift+S` -- screenshot + OCR ([EasyOCR](https://github.com/JaidedAI/EasyOCR)), `Ctrl+Shift+W` -- paste the selected text into the transcript verbatim.
+- Capture the full screen, an area or one window (even when covered).
+- **Auto frames**: a frame every second, kept only when a new scene stays on screen (pixel triage + CLIP filter that drops talking heads); **Detect video** crops to the player inside a browser or call window. See [Auto frames](#auto-frames).
+- Hide lines, screenshots and frames (one by one or "this and the similar ones"); **Pick** keeps the N frames that were talked about most.
+- **Describe**: a vision LLM describes a screenshot or frame; descriptions and OCR are condensed into screen notes for Beautify.
+
+**Web UI and documents.**
+- Live transcript, screenshots and frames panels, Start/Stop/Cut, auto-stop that can be moved while recording; English or Russian UI.
+- **Beautify**: a full annotated HTML transcript -- real speaker names, SUMMARY callouts (NEW / CONFIRMS / UPDATES in update runs), screenshots inline. Versions with logs and prompts; prompts editable per project; long transcripts processed in parts; a self-contained export with embedded images.
+- **Ask**: chat about the recording while it is still running.
+- **Notes** per project (who's who, terms, corrections, "who said it"), and an **external transcript** (Teams `.vtt`/`.docx`/`.txt`/`.srt`, YouTube subtitles) merged in: names from it, terms and times from ushi.
+- Everything also works from the console (`main.py`, `beautify.py`, `batch.py`, `process_transcript.py`).
 
 ## Architecture
 
@@ -217,10 +251,12 @@ VOICE_REC_PYTHON=/path/to/python ./webui.sh --port 9000 --no-browser
 - **Live transcript**: phrases appear as they're recognized, with a mic level meter and listening / transcribing state.
 - **Screenshots panel**: each capture shows its pipeline status: Captured → Transcript → OCR → Beautified vN. `Snap` takes one without the hotkey.
 - **Capture area**: full screen, a dragged **area**, or a specific **window**. A window is captured even when other windows cover it. Changes apply immediately, even mid-recording, so the UI itself can stay out of screenshots.
-- **Beautify**: builds a *full* annotated transcript (every utterance, real speakers, a SUMMARY callout per topic, screenshots inline; *Update* runs mark the new part with NEW / CONFIRMS / UPDATES callouts against what was known before) through Claude Code (`claude -p`). Every press creates a new version:
+- **Beautify**: builds a *full* annotated transcript (every utterance, real speakers, a SUMMARY callout per topic, screenshots inline; *Update* runs mark the new part with NEW / CONFIRMS / UPDATES callouts against what was known before) through Claude Code (`claude -p`) or an LLM API (see **AI** below). Every press creates a new version:
   - *Update* (default) extends the previous version with the new material.
   - *Full rebuild* regenerates the whole document.
-  - *Final* runs automatically when recording stops. It uses the diarized transcript and is also copied to `docs/`.
+  - *Final* uses the diarized transcript and is also copied to `docs/` (self-contained, images embedded, plus a text-only version). When recording stops, the UI offers to build it.
+  - Through an API, a long transcript is split into ~25,000-character parts at the longest pause, one request each; a cut-off answer is asked to continue.
+  - Every version has a log (`vN.log`) and the prompt that went to the model; any earlier version can be opened. **Edit prompt(s)** in the Beautify menu changes the prompts for the current project only.
   - **Embed images** (next to *Open*) saves the shown version as `vN-emb.html` with every image embedded as a `data:` URI: one file that opens anywhere, to share without the `screenshots/` and `frames/` folders.
 - **Ask**: chat about the transcript (live or saved) while recording keeps running. It follows up with only the new lines.
 - **Notes**: one file per project, `projects/<name>/notes.md`, sent with every Beautify and Ask request as authoritative context: who's who, the client, terms that are often misheard. Edits are saved as you type.
@@ -251,7 +287,7 @@ Files: versions in `projects/<p>/sessions/<sid>/vN.html` (+ `manifest.json`, tra
 
 ### macOS app
 
-`ushi.app` is the web UI in its own window, with everything inside: Python 3.12 and all dependencies, the screenshot helper, ffmpeg and (by default) all models -- Silero VAD, Whisper large-v3-turbo, GigaAM v3, Parakeet v3, CLIP, ECAPA, EasyOCR. Nothing has to be installed; it works offline. Apple Silicon (M1 or later), macOS 14+.
+`ushi.app` is the web UI in its own window, with everything inside: Python 3.12 and all dependencies, the screenshot and audio helpers, ffmpeg. The [released DMGs](https://github.com/raliev/ushi/releases/latest) have no models (each is downloaded on first use); a build of your own can include all of them -- Silero VAD, Whisper large-v3-turbo, GigaAM v3, Parakeet v3, CLIP, ECAPA, EasyOCR -- and then works offline from the start. Apple Silicon or Intel (`ARCH=x64`), macOS 14+.
 
 Build it (`app/dist/ushi-<version>-arm64.dmg`, ~4 GB with all models):
 
@@ -390,7 +426,9 @@ It writes `index.html` with every scene for a quick look.
 
 On a slide talk, different slides were ≤ 0.84 apart and the same slide later ≥ 0.966. Turn it off with `--no-frames-l1` (console), the *Smart filter* switch in Settings (web UI), or `--no-l1` (offline); if the model can't load, auto frames run on Level 0 alone.
 
-Planned: Level 2 (OCR + VLM caption) as an `Enricher`, and a final pick by a text LLM over the transcript and scene list.
+**Text on frames.** New scenes are OCR'd like screenshots (`frame_x.txt`; after Stop the remaining ones are still read). The **Describe** button on a screenshot or frame sends it to a vision model (Settings: provider and model; OpenAI, Gemini, Anthropic or OpenRouter) and saves `<image>.desc.md`, which replaces the OCR text. Before Beautify, the texts of all the session's images go through one more request that drops boilerplate (menus, repeated pages, OCR noise); each part of the transcript then gets the screen notes of its time (`image_notes.py`, cached in `sessions/<sid>/screen_notes.json`).
+
+Planned: a final frame pick by a text LLM over the transcript and the scene list.
 
 ## Configuration
 
@@ -429,8 +467,11 @@ Key constants in `main.py`:
 | `audio_helper_win.py` | Windows counterpart of `audio_helper`: system audio via WASAPI loopback |
 | `setup_windows.ps1`, `webui.bat` | Windows setup (venv, PyTorch CUDA/CPU, dependencies) and launcher |
 | `app/` | macOS app: Electron shell (`main.js`), build config (`package.json`), icon and entitlements |
-| `packaging/` | macOS app build: `build_app.sh`, bundled Python runtime, models, icon |
-| `beautify.py` | Full annotated transcript via Claude Code (also a console tool) |
+| `packaging/` | App builds (macOS and Windows): `build_app.sh`, bundled Python runtime, models, icon |
+| `beautify.py` | Full annotated transcript via Claude Code or an LLM API (also a console tool) |
+| `image_notes.py` | Screen notes for Beautify: OCR / vision descriptions (Describe) of images, condensed |
+| `media_file.py` | Audio/video files as a source: probing, time range, frames from the video |
+| `batch.py` | YouTube batch queue: download → transcribe → Beautify (also a console tool) |
 | `llm_api.py` | Beautify / chat through an LLM API (OpenAI-compatible protocol), provider settings and keys |
 | `downloads.py` | Progress of models downloaded on first use |
 | `claude_cli.py` | Helpers for headless `claude -p` (stream-json parsing, progress labels) |
